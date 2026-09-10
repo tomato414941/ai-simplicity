@@ -2,7 +2,6 @@ const messagesElement = document.querySelector("#messages");
 const form = document.querySelector("#composer");
 const input = document.querySelector("#message-input");
 const submitButton = form.querySelector("button");
-const welcomeTemplate = document.querySelector("#welcome-template");
 
 let sending = false;
 
@@ -17,7 +16,6 @@ form.addEventListener("submit", async (event) => {
 
   sending = true;
   submitButton.disabled = true;
-  removeWelcome();
   removeError();
   const userMessage = appendMessage({ role: "user", text });
   input.value = "";
@@ -64,15 +62,9 @@ async function loadMessages() {
     if (!response.ok) throw new Error();
     const { messages } = await response.json();
 
-    if (messages.length === 0) {
-      messagesElement.append(welcomeTemplate.content.cloneNode(true));
-      return;
-    }
-
     messages.forEach(appendMessage);
     scrollToLatest(false);
   } catch {
-    messagesElement.append(welcomeTemplate.content.cloneNode(true));
     showError("以前の会話を読み込めませんでした。もう一度お試しください。");
   }
 }
@@ -106,10 +98,6 @@ function showError(text) {
 
 function removeError() {
   messagesElement.querySelector(".error-banner")?.remove();
-}
-
-function removeWelcome() {
-  messagesElement.querySelector(".welcome")?.remove();
 }
 
 function resizeInput() {

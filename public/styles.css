@@ -1,13 +1,10 @@
 :root {
   color-scheme: light;
   --paper: #f4f0e8;
-  --paper-deep: #e8e0d3;
   --ink: #25231f;
   --ink-soft: #6f695f;
-  --line: rgba(64, 58, 49, 0.14);
   --accent: #d95f45;
   --accent-dark: #a83e2a;
-  --assistant: rgba(255, 253, 248, 0.72);
   --user: #292722;
   font-family: "Avenir Next", Avenir, "Hiragino Kaku Gothic ProN", sans-serif;
   background: var(--paper);
@@ -46,85 +43,18 @@ textarea {
 
 .conversation-shell {
   position: relative;
-  display: grid;
-  grid-template-rows: auto 1fr auto;
   width: min(100%, 760px);
   min-height: 100dvh;
   margin: 0 auto;
   padding: 0 28px;
 }
 
-.quiet-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 76px;
-  border-bottom: 1px solid var(--line);
-  color: var(--ink-soft);
-  font-size: 0.76rem;
-  letter-spacing: 0.08em;
-}
-
-.presence {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-.presence-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 5px rgba(217, 95, 69, 0.1);
-}
-
-.continuity {
-  margin: 0;
-}
-
 .messages {
   display: flex;
   flex-direction: column;
   gap: 28px;
-  min-height: 0;
-  padding: 64px 0 190px;
-}
-
-.welcome {
-  width: min(100%, 570px);
-  margin: auto 0;
-  padding: 10vh 0 20vh;
-  animation: arrive 650ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
-}
-
-.eyebrow {
-  margin: 0 0 16px;
-  color: var(--accent-dark);
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-}
-
-.welcome h1 {
-  margin: 0;
-  font-family: "Iowan Old Style", "Hiragino Mincho ProN", YuMincho, Georgia, serif;
-  font-size: clamp(2.3rem, 8vw, 4.7rem);
-  font-weight: 500;
-  letter-spacing: -0.055em;
-  line-height: 1.05;
-}
-
-.welcome h1 span {
-  display: block;
-  white-space: nowrap;
-}
-
-.welcome > p:last-child {
-  margin: 22px 0 0;
-  color: var(--ink-soft);
-  font-size: 0.95rem;
+  min-height: 100dvh;
+  padding: 48px 0 150px;
 }
 
 .message {
@@ -193,7 +123,7 @@ textarea {
   grid-template-columns: 1fr 48px;
   gap: 10px;
   width: min(calc(100% - 32px), 704px);
-  padding: 9px 9px 8px 20px;
+  padding: 9px 9px 9px 20px;
   transform: translateX(-50%);
   border: 1px solid rgba(76, 67, 56, 0.15);
   border-radius: 25px;
@@ -268,15 +198,6 @@ textarea {
   stroke-width: 1.8;
 }
 
-.composer-note {
-  grid-column: 1 / -1;
-  margin: 1px 8px 2px 0;
-  color: var(--ink-soft);
-  font-size: 0.67rem;
-  letter-spacing: 0.02em;
-  text-align: center;
-}
-
 .error-banner {
   align-self: center;
   padding: 10px 14px;
@@ -299,11 +220,6 @@ textarea {
   border: 0;
 }
 
-@keyframes arrive {
-  from { opacity: 0; transform: translateY(18px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
 @keyframes rise {
   from { opacity: 0; transform: translateY(9px); }
   to { opacity: 1; transform: translateY(0); }
@@ -319,21 +235,9 @@ textarea {
     padding: 0 20px;
   }
 
-  .quiet-header {
-    min-height: 64px;
-  }
-
-  .continuity {
-    display: none;
-  }
-
   .messages {
-    padding-top: 42px;
-    padding-bottom: 160px;
-  }
-
-  .welcome {
-    padding-bottom: 22vh;
+    padding-top: 32px;
+    padding-bottom: 140px;
   }
 
   .message {
