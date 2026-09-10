@@ -23,7 +23,13 @@ test("keeps every turn in one OpenAI conversation", async () => {
     responses: {
       create: async (request) => {
         calls.push(request);
-        return { output_text: `Reply ${calls.length}` };
+        const reply = `Reply ${calls.length}`;
+        return (async function* () {
+          yield { type: "response.output_text.delta", delta: "Reply " };
+          yield { type: "response.output_text.delta", delta: reply.slice(6) };
+          yield { type: "response.output_text.done", text: reply };
+          yield { type: "response.completed" };
+        })();
       },
     },
   };
@@ -41,14 +47,17 @@ test("keeps every turn in one OpenAI conversation", async () => {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ text: "First thought" }),
   });
+  assert.equal(first.status, 200);
+  assert.match(await first.text(), /event: delta\ndata: \{"text":"Reply "\}/);
+
   const second = await fetch(`${baseUrl}/api/messages`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ text: "A different topic" }),
   });
 
-  assert.equal(first.status, 201);
-  assert.equal(second.status, 201);
+  assert.equal(second.status, 200);
+  assert.match(await second.text(), /event: done/);
   assert.deepEqual(
     calls.map(({ conversation: id, input }) => ({ id, input })),
     [
@@ -56,6 +65,7 @@ test("keeps every turn in one OpenAI conversation", async () => {
       { id: "conv_test", input: "A different topic" },
     ],
   );
+  assert.equal(calls.every((call) => call.stream === true), true);
 
   const history = await fetch(`${baseUrl}/api/messages`).then((response) => response.json());
   assert.deepEqual(
@@ -90,6 +100,37 @@ test("serves the conversation surface and validates messages", async () => {
     body: JSON.stringify({ text: "   " }),
   });
   assert.equal(invalid.status, 400);
+});
+
+test("reports a streaming failure without presenting it as complete", async () => {
+  const errors = [];
+  const conversation = {
+    messages: async () => [],
+    send: async (_text, { onDelta }) => {
+      onDelta("Partial");
+      throw new Error("Provider detail");
+    },
+  };
+  const server = await listen(
+    createServer({
+      conversation,
+      logger: { error: (error) => errors.push(error.message) },
+    }),
+  );
+  servers.push(server);
+
+  const response = await fetch(`${address(server)}/api/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "Hello" }),
+  });
+  const stream = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(stream, /event: delta\ndata: \{"text":"Partial"\}/);
+  assert.match(stream, /event: error/);
+  assert.doesNotMatch(stream, /Provider detail/);
+  assert.deepEqual(errors, ["Provider detail"]);
 });
 
 function listen(server) {

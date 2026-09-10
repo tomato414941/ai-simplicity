@@ -29,11 +29,22 @@ form.addEventListener("submit", async (event) => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text }),
     });
-    const body = await response.json();
-    if (!response.ok) throw new Error("今は応答できません。少し待ってから、もう一度お試しください。");
+    if (!response.ok || !response.body) {
+      throw new Error("今は応答できません。少し待ってから、もう一度お試しください。");
+    }
 
-    pending.remove();
-    appendMessage(body.message);
+    await readEvents(response.body, {
+      delta({ text: delta }) {
+        appendDelta(pending, delta);
+        scrollToLatest();
+      },
+      done({ message }) {
+        setMessage(pending, message.text);
+      },
+      error() {
+        throw new Error("今は応答できません。少し待ってから、もう一度お試しください。");
+      },
+    });
   } catch (error) {
     pending.remove();
     userMessage.remove();
@@ -86,6 +97,59 @@ function appendPending() {
   article.innerHTML = '<span class="thinking"><span></span><span></span><span></span></span>';
   messagesElement.append(article);
   return article;
+}
+
+function appendDelta(message, text) {
+  const paragraph = ensureMessageText(message);
+  paragraph.textContent += text;
+}
+
+function setMessage(message, text) {
+  ensureMessageText(message).textContent = text;
+}
+
+function ensureMessageText(message) {
+  let paragraph = message.querySelector("p");
+  if (!paragraph) {
+    paragraph = document.createElement("p");
+    message.classList.remove("pending");
+    message.removeAttribute("aria-label");
+    message.replaceChildren(paragraph);
+  }
+  return paragraph;
+}
+
+async function readEvents(stream, handlers) {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+
+    let boundary;
+    while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      dispatchEvent(block, handlers);
+    }
+
+    if (done) break;
+  }
+}
+
+function dispatchEvent(block, handlers) {
+  const lines = block.split("\n");
+  const event = lines.find((line) => line.startsWith("event: "))?.slice(7);
+  const data = lines
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => line.slice(6))
+    .join("\n");
+
+  if (event && data && handlers[event]) {
+    handlers[event](JSON.parse(data));
+  }
 }
 
 function showError(text) {

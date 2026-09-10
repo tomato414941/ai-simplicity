@@ -21,13 +21,13 @@ export class Conversation {
     return state.messages;
   }
 
-  async send(text) {
-    const turn = this.#turnQueue.then(() => this.#send(text));
+  async send(text, { onDelta = () => {} } = {}) {
+    const turn = this.#turnQueue.then(() => this.#send(text, onDelta));
     this.#turnQueue = turn.catch(() => {});
     return turn;
   }
 
-  async #send(text) {
+  async #send(text, onDelta) {
     let state = await this.#store.read();
     let conversationId = state.conversationId;
 
@@ -40,14 +40,43 @@ export class Conversation {
       }));
     }
 
-    const response = await this.#client.responses.create({
+    const stream = await this.#client.responses.create({
       model: this.#model,
       conversation: conversationId,
       instructions: INSTRUCTIONS,
       input: text,
+      stream: true,
     });
 
-    const reply = response.output_text?.trim();
+    let reply = "";
+
+    for await (const event of stream) {
+      if (
+        event.type === "response.output_text.delta" ||
+        event.type === "response.refusal.delta"
+      ) {
+        reply += event.delta;
+        onDelta(event.delta);
+      }
+
+      if (event.type === "response.output_text.done") {
+        reply = event.text;
+      }
+
+      if (event.type === "response.refusal.done") {
+        reply = event.refusal;
+      }
+
+      if (event.type === "response.failed") {
+        throw new Error(event.response?.error?.message ?? "The model response failed.");
+      }
+
+      if (event.type === "response.incomplete") {
+        throw new Error("The model response was incomplete.");
+      }
+    }
+
+    reply = reply.trim();
     if (!reply) {
       throw new Error("The model returned no text.");
     }

@@ -38,8 +38,7 @@ export function createServer({ conversation, logger = console }) {
           return sendJson(response, 400, { error: "Message text is too long." });
         }
 
-        const message = await conversation.send(text);
-        return sendJson(response, 201, { message });
+        return streamMessage({ conversation, logger, response, text });
       }
 
       if (request.method === "GET") {
@@ -57,6 +56,36 @@ export function createServer({ conversation, logger = console }) {
       });
     }
   });
+}
+
+async function streamMessage({ conversation, logger, response, text }) {
+  response.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  });
+
+  try {
+    const message = await conversation.send(text, {
+      onDelta(delta) {
+        sendEvent(response, "delta", { text: delta });
+      },
+    });
+    sendEvent(response, "done", { message });
+  } catch (error) {
+    logger.error(error);
+    sendEvent(response, "error", {
+      error: "The conversation is unavailable right now.",
+    });
+  } finally {
+    response.end();
+  }
+}
+
+function sendEvent(response, event, value) {
+  if (response.destroyed) return;
+  response.write(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`);
 }
 
 async function readJson(request) {
