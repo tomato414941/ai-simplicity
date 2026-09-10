@@ -1,0 +1,30 @@
+import OpenAI from "openai";
+import { resolve } from "node:path";
+import { Conversation } from "./conversation.js";
+import { createServer } from "./server.js";
+import { StateStore } from "./state-store.js";
+
+if (!process.env.OPENAI_API_KEY) {
+  console.error("OPENAI_API_KEY is required.");
+  process.exit(1);
+}
+
+const port = Number.parseInt(process.env.PORT ?? "3000", 10);
+if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+  console.error("PORT must be a valid port number.");
+  process.exit(1);
+}
+
+const store = new StateStore(resolve(process.env.STATE_PATH ?? "data/state.json"));
+const conversation = new Conversation({
+  client: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
+  model: process.env.OPENAI_MODEL ?? "gpt-6-astra",
+  store,
+});
+const server = createServer({ conversation });
+
+server.listen(port, () => {
+  const address = server.address();
+  const activePort = typeof address === "object" ? address.port : port;
+  console.log(`ai-simplicity is listening on http://localhost:${activePort}`);
+});

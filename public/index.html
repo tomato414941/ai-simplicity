@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f4f0e8" />
+    <meta
+      name="description"
+      content="整理せず、そのまま話し続けられるAIとの会話。"
+    />
+    <title>話す</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="atmosphere" aria-hidden="true"></div>
+    <main class="conversation-shell">
+      <header class="quiet-header">
+        <div class="presence" aria-label="会話できます">
+          <span class="presence-dot"></span>
+          <span>ここにいます</span>
+        </div>
+        <p class="continuity">ひとつづきの会話</p>
+      </header>
+
+      <section
+        id="messages"
+        class="messages"
+        aria-label="会話"
+        aria-live="polite"
+      ></section>
+
+      <form id="composer" class="composer">
+        <label class="visually-hidden" for="message-input">メッセージ</label>
+        <textarea
+          id="message-input"
+          name="message"
+          rows="1"
+          maxlength="20000"
+          placeholder="いま考えていることを、そのまま"
+          autocomplete="off"
+          required
+        ></textarea>
+        <button type="submit" aria-label="送る">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 12h13m-5-5 5 5-5 5" />
+          </svg>
+        </button>
+        <p class="composer-note">話題が変わっても、そのままで大丈夫です</p>
+      </form>
+    </main>
+
+    <template id="welcome-template">
+      <article class="welcome">
+        <p class="eyebrow">いつでも、ここから</p>
+        <h1><span>何から</span><span>話しましょう。</span></h1>
+        <p>うまく整理されていなくても構いません。</p>
+      </article>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
