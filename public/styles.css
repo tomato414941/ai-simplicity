@@ -3,8 +3,9 @@
   --paper: #10110f;
   --ink: #e9e6de;
   --ink-soft: #8b8e86;
-  --accent: #ef5d3f;
-  --accent-hover: #ff7659;
+  --signal: #747b73;
+  --action: #dfe0da;
+  --action-hover: #f4f3ee;
   --user: #e7e1d5;
   font-family: "Avenir Next", Avenir, "Hiragino Kaku Gothic ProN", sans-serif;
   background: var(--paper);
@@ -36,8 +37,8 @@ textarea {
   inset: 0;
   pointer-events: none;
   background:
-    radial-gradient(circle at 12% 2%, rgba(239, 93, 63, 0.1), transparent 27rem),
-    radial-gradient(circle at 92% 50%, rgba(77, 112, 94, 0.08), transparent 33rem),
+    radial-gradient(circle at 12% 2%, rgba(93, 112, 101, 0.08), transparent 27rem),
+    radial-gradient(circle at 92% 50%, rgba(85, 94, 117, 0.06), transparent 33rem),
     repeating-linear-gradient(100deg, transparent 0 18px, rgba(255, 255, 255, 0.012) 19px 20px);
 }
 
@@ -83,7 +84,7 @@ textarea {
 .message.assistant {
   align-self: flex-start;
   padding: 5px 2px 5px 22px;
-  border-left: 2px solid var(--accent);
+  border-left: 2px solid var(--signal);
   font-family: "Iowan Old Style", "Hiragino Mincho ProN", YuMincho, Georgia, serif;
   font-size: 1.08rem;
 }
@@ -169,15 +170,15 @@ textarea {
   padding: 0;
   border: 0;
   border-radius: 17px;
-  background: var(--accent);
-  color: white;
+  background: var(--action);
+  color: #171815;
   cursor: pointer;
   transition: transform 160ms ease, background 160ms ease;
 }
 
 .composer button:hover:not(:disabled) {
   transform: translateY(-2px);
-  background: var(--accent-hover);
+  background: var(--action-hover);
 }
 
 .composer button:active:not(:disabled) {
@@ -187,6 +188,11 @@ textarea {
 .composer button:disabled {
   cursor: wait;
   opacity: 0.5;
+}
+
+.composer button:focus-visible {
+  outline: 2px solid #bfc3ba;
+  outline-offset: 3px;
 }
 
 .composer button svg {

@@ -80,7 +80,9 @@ test("serves the conversation surface and validates messages", async () => {
 
   const page = await fetch(baseUrl);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /placeholder="話す"/);
+  const html = await page.text();
+  assert.match(html, /<title>AI<\/title>/);
+  assert.match(html, /placeholder="話す"/);
 
   const invalid = await fetch(`${baseUrl}/api/messages`, {
     method: "POST",
