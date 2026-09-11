@@ -13,25 +13,26 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => close(server)));
 });
 
-test("keeps every turn in one OpenAI conversation", async () => {
+test("keeps every turn in one managed agent session", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ai-simplicity-"));
   const calls = [];
+  const creations = [];
   const client = {
-    conversations: {
-      create: async () => ({ id: "conv_test" }),
-    },
-    responses: {
-      create: async (request) => {
-        calls.push(request);
+    beta: { agents: { sessions: {
+      create: async (request) => { creations.push(request); return { id: "sess_test" }; },
+      stream: (sessionId, request) => {
+        calls.push({ sessionId, ...request });
         const reply = `Reply ${calls.length}`;
-        return (async function* () {
-          yield { type: "response.output_text.delta", delta: "Reply " };
-          yield { type: "response.output_text.delta", delta: reply.slice(6) };
-          yield { type: "response.output_text.done", text: reply };
-          yield { type: "response.completed" };
-        })();
+        return Object.assign((async function* () {
+          yield { type: "agent.session.idle" };
+          yield { type: "agent.session.turn.item.added", item: { id: "msg_test", type: "message", role: "assistant", phase: "final_answer" } };
+          yield { type: "agent.session.turn.output_text.delta", item_id: "msg_test", content_index: 0, delta: "Reply " };
+          yield { type: "agent.session.turn.output_text.delta", item_id: "msg_test", content_index: 0, delta: reply.slice(6) };
+          yield { type: "agent.session.turn.output_text.done", item_id: "msg_test", content_index: 0, text: reply };
+          yield { type: "agent.session.turn.completed", turn: { id: `turn_${calls.length}`, subagent_id: null } };
+        })(), { controller: new AbortController() });
       },
-    },
+    } } },
   };
   const conversation = new Conversation({
     client,
@@ -59,13 +60,17 @@ test("keeps every turn in one OpenAI conversation", async () => {
   assert.equal(second.status, 200);
   assert.match(await second.text(), /event: done/);
   assert.deepEqual(
-    calls.map(({ conversation: id, input }) => ({ id, input })),
+    calls.map(({ sessionId: id, input }) => ({ id, input })),
     [
-      { id: "conv_test", input: "First thought" },
-      { id: "conv_test", input: "A different topic" },
+      { id: "sess_test", input: "First thought" },
+      { id: "sess_test", input: "A different topic" },
     ],
   );
-  assert.equal(calls.every((call) => call.stream === true), true);
+  assert.equal(creations.length, 1);
+  assert.equal(creations[0].agent.model, "test-model");
+  assert.deepEqual(creations[0].agent.tools, [{ type: "web_search", mode: "live" }]);
+  assert.deepEqual(creations[0].environment, { type: "openai_hosted", network: { access: "enabled" } });
+  assert.notEqual(calls[0].idempotencyKey, calls[1].idempotencyKey);
 
   const history = await fetch(`${baseUrl}/api/messages`).then((response) => response.json());
   assert.deepEqual(

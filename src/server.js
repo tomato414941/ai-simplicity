@@ -65,6 +65,11 @@ async function streamMessage({ conversation, logger, response, text }) {
     connection: "keep-alive",
     "x-accel-buffering": "no",
   });
+  response.flushHeaders();
+  const heartbeat = setInterval(() => {
+    if (!response.destroyed) response.write(": keep-alive\n\n");
+  }, 15_000);
+  heartbeat.unref();
 
   try {
     const message = await conversation.send(text, {
@@ -79,6 +84,7 @@ async function streamMessage({ conversation, logger, response, text }) {
       error: "The conversation is unavailable right now.",
     });
   } finally {
+    clearInterval(heartbeat);
     response.end();
   }
 }

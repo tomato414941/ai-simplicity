@@ -3,6 +3,9 @@ import { dirname } from "node:path";
 
 const EMPTY_STATE = Object.freeze({
   conversationId: null,
+  agentSessionId: null,
+  agentLastTurnId: null,
+  pendingAgentTurn: null,
   messages: [],
 });
 
@@ -66,6 +69,14 @@ function validateState(state) {
   if (
     !state ||
     (state.conversationId !== null && typeof state.conversationId !== "string") ||
+    (state.agentSessionId != null && typeof state.agentSessionId !== "string") ||
+    (state.agentLastTurnId != null && typeof state.agentLastTurnId !== "string") ||
+    (state.pendingAgentTurn != null && (
+      !state.agentSessionId ||
+      ["text", "input", "idempotencyKey", "createdAt"].some(
+        (field) => typeof state.pendingAgentTurn[field] !== "string",
+      )
+    )) ||
     !Array.isArray(state.messages) ||
     state.messages.some(
       (message) =>
