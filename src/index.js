@@ -1,8 +1,8 @@
 import OpenAI from "openai";
 import { resolve } from "node:path";
-import { Conversation } from "./conversation.js";
+import { AgentSession } from "./agent-session.js";
 import { createServer } from "./server.js";
-import { StateStore } from "./state-store.js";
+import { SessionStore } from "./session-store.js";
 
 if (!process.env.OPENAI_API_KEY) {
   console.error("OPENAI_API_KEY is required.");
@@ -15,13 +15,14 @@ if (!Number.isInteger(port) || port < 0 || port > 65_535) {
   process.exit(1);
 }
 
-const store = new StateStore(resolve(process.env.STATE_PATH ?? "data/state.json"));
-const conversation = new Conversation({
+const store = new SessionStore(resolve(process.env.STATE_PATH ?? "data/state.json"));
+const session = new AgentSession({
   client: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
   model: process.env.OPENAI_MODEL ?? "gpt-6-astra",
   store,
 });
-const server = createServer({ conversation });
+await session.initialize();
+const server = createServer({ session });
 
 server.listen(port, () => {
   const address = server.address();
