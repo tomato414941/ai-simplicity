@@ -13,11 +13,13 @@ const pending = (fields = {}) => ({
 
 // Small DOM test double: runs the shipped script without browser automation or dependencies.
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.handlers = {}; this.style = {}; this.value = ""; this.scrollHeight = 40; }
+  constructor(tag) { this.tag = tag; this.children = []; this.handlers = {}; this.attributes = {}; this.style = {}; this.value = ""; this.scrollHeight = 40; }
   append(node) { node.parent = this; this.children.push(node); }
   insertBefore(node, reference) { node.parent = this; this.children.splice(this.children.indexOf(reference), 0, node); }
   remove() { this.parent.children.splice(this.parent.children.indexOf(this), 1); }
-  querySelector(tag) { return this.children.find((node) => node.tag === tag); }
+  querySelector(tag) { return this.children.find((node) => node.tag === tag) ?? this.children.map((node) => node.querySelector(tag)).find(Boolean); }
+  setAttribute(name, value) { this.attributes[name] = value; }
+  getAttribute(name) { return this.attributes[name]; }
   addEventListener(type, callback) { this.handlers[type] = callback; }
   focus() {}
   requestSubmit() { this.handlers.submit({ preventDefault() {} }); }
@@ -26,8 +28,11 @@ class Element {
 }
 
 async function boot(handler, saved = new Map()) {
-  const elements = Object.fromEntries(["messages", "composer", "message-input", "reply-status", "status-text", "status-indicator", "status-action", "stop-generation"].map((id) => [id, new Element(id)]));
+  const elements = Object.fromEntries(["messages", "composer", "message-input", "reply-status", "status-text", "status-indicator", "status-action"].map((id) => [id, new Element(id)]));
   const submit = new Element("button");
+  const svg = new Element("svg");
+  svg.append(new Element("path"));
+  submit.append(svg);
   elements.composer.append(submit);
   elements.messages.append(elements["reply-status"]);
   const timers = new Map();
@@ -58,6 +63,13 @@ async function boot(handler, saved = new Map()) {
     text: () => elements.messages.children.filter((node) => node.tag === "article").map((node) => node.textContent),
     async send(text) { elements["message-input"].value = text; elements.composer.requestSubmit(); await flush(); },
     async click(id = "status-action") { elements[id].handlers.click(); await flush(); },
+    async clickComposer() {
+      if (submit.disabled) return;
+      const type = submit.type;
+      submit.handlers.click();
+      if (type === "submit") elements.composer.requestSubmit();
+      await flush();
+    },
     async advance(ms) {
       const target = time + ms;
       while (true) {
@@ -282,10 +294,11 @@ test("stop retains the partial reply and draft, then enables the next input only
     if (url === "/api/stop") state.pending.stopRequested = true;
     return Response.json(state);
   }, new Map([[DRAFT_KEY, "次の質問"]]));
-  assert.equal(ui.elements["stop-generation"].hidden, false);
-  await ui.click("stop-generation");
+  assert.equal(ui.submit.getAttribute("aria-label"), "停止");
+  assert.equal(ui.submit.type, "button");
+  await ui.clickComposer();
   assert.equal(ui.elements["status-text"].textContent, "停止しています");
-  assert.equal(ui.elements["stop-generation"].hidden, true);
+  assert.equal(ui.submit.getAttribute("aria-label"), "停止中");
   assert.equal(ui.submit.disabled, true);
   assert.deepEqual(ui.text(), ["こんにちは", "途中の返答"]);
   assert.equal(ui.elements["message-input"].value, "次の質問");
@@ -295,6 +308,8 @@ test("stop retains the partial reply and draft, then enables the next input only
   assert.deepEqual(ui.text(), ["こんにちは", "途中の返答停止しました"]);
   assert.equal(ui.elements["reply-status"].hidden, true);
   assert.equal(ui.submit.disabled, false);
+  assert.equal(ui.submit.getAttribute("aria-label"), "送る");
+  assert.equal(ui.submit.type, "submit");
   assert.equal(ui.elements["message-input"].value, "次の質問");
   assert.equal(ui.saved.has(PENDING_KEY), false);
   assert.equal(ui.timers.size, 0);
@@ -312,7 +327,7 @@ test("a lost stop response recovers the recorded intent without another stop or 
     }
     return Response.json(state);
   });
-  await ui.click("stop-generation");
+  await ui.clickComposer();
   assert.equal(ui.elements["status-text"].textContent, "停止の状態を確認しています");
   await ui.advance(60_000);
   assert.equal(ui.elements["status-text"].textContent, "今は停止を確認できません。途中の返答は保存されています。");
@@ -343,7 +358,7 @@ test("stopping before any output shows only the stop label, including after relo
   assert.equal(reply.querySelector("p").hidden, true);
   assert.equal(reply.querySelector("small").hidden, false);
   assert.equal(ui.submit.disabled, false);
-  assert.equal(ui.elements["stop-generation"].hidden, true);
+  assert.equal(ui.submit.getAttribute("aria-label"), "送る");
 });
 
 test("a stop that was not accepted leaves a clear message and a usable stop action", async () => {
@@ -351,11 +366,11 @@ test("a stop that was not accepted leaves a clear message and a usable stop acti
     if (url === "/api/stop") return Response.json({ error: "Unavailable" }, { status: 503 });
     return Response.json({ messages: [], pending: pending(), observation: "current" });
   });
-  await ui.click("stop-generation");
+  await ui.clickComposer();
   assert.equal(ui.elements["status-text"].textContent, "停止を確認できませんでした。もう一度お試しください。");
-  assert.equal(ui.elements["stop-generation"].hidden, false);
-  assert.equal(ui.elements["stop-generation"].disabled, false);
-  assert.equal(ui.submit.disabled, true);
+  assert.equal(ui.submit.getAttribute("aria-label"), "停止");
+  assert.equal(ui.submit.disabled, false);
+  assert.equal(ui.submit.type, "button");
 });
 
 test("stop remains usable during a slow status read and ignores its late stale result", async () => {
@@ -369,12 +384,82 @@ test("stop remains usable during a slow status read and ignores its late stale r
   });
   const polling = ui.advance(2000);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(ui.elements["stop-generation"].disabled, false);
-  await ui.click("stop-generation");
+  assert.equal(ui.submit.disabled, false);
+  await ui.clickComposer();
   release(Response.json({ messages: [], pending: pending(), observation: "current" }));
   await polling;
   assert.deepEqual(ui.text(), ["こんにちは", "途中の返答停止しました"]);
   assert.equal(ui.submit.disabled, false);
-  assert.equal(ui.elements["stop-generation"].hidden, true);
+  assert.equal(ui.submit.getAttribute("aria-label"), "送る");
   assert.equal(ui.timers.size, 0);
+});
+
+for (const outcome of ["completed", "stopped"]) {
+  test(`one composer button switches from send to stop and back after ${outcome}`, async () => {
+    let state = { messages: [], pending: null, observation: "current" };
+    const ui = await boot(async (url, options) => {
+      if (url === "/api/messages" && options.method === "POST") state = { messages: [], pending: pending(), observation: "current" };
+      if (url === "/api/stop") state.pending.stopRequested = true;
+      return Response.json(state);
+    });
+    const button = ui.submit;
+    const icon = button.querySelector("path");
+    assert.equal(button.type, "submit");
+    assert.equal(button.getAttribute("aria-label"), "送る");
+    assert.equal(button.getAttribute("title"), "送る");
+    assert.equal(icon.getAttribute("fill"), "none");
+    const sendPath = icon.getAttribute("d");
+
+    ui.elements["message-input"].value = "こんにちは";
+    await ui.clickComposer();
+    assert.equal(ui.submit, button);
+    assert.equal(button.type, "button", "Stop must bypass the empty textarea's required validation");
+    assert.equal(button.getAttribute("aria-label"), "停止");
+    assert.equal(button.getAttribute("title"), "停止");
+    assert.equal(icon.getAttribute("fill"), "currentColor");
+    assert.equal(icon.getAttribute("d"), "M8 8h8v8H8z");
+    assert.equal(ui.elements["message-input"].value, "");
+    if (outcome === "stopped") {
+      await ui.clickComposer();
+      assert.equal(button.disabled, true);
+      assert.equal(button.getAttribute("aria-label"), "停止中");
+      await ui.clickComposer();
+      state = { messages: stoppedMessages(), pending: null, observation: "current" };
+    } else {
+      state = { messages: [
+        { id: "request_1", role: "user", text: "こんにちは" },
+        { id: "request_1:reply", role: "assistant", text: "完成しました" },
+      ], pending: null, observation: "current" };
+    }
+    await ui.advance(2000);
+    assert.equal(button.disabled, false);
+    assert.equal(button.type, "submit");
+    assert.equal(button.getAttribute("aria-label"), "送る");
+    assert.equal(button.getAttribute("title"), "送る");
+    assert.equal(icon.getAttribute("d"), sendPath);
+    assert.equal(icon.getAttribute("fill"), "none");
+    assert.deepEqual(ui.requests.filter((request) => request.method === "POST").map((request) => request.url),
+      outcome === "stopped" ? ["/api/messages", "/api/stop"] : ["/api/messages"]);
+  });
+}
+
+test("Enter sends when idle but never stops generation or discards the next draft", async () => {
+  let state = { messages: [], pending: null, observation: "current" };
+  const ui = await boot(async (_url, options) => {
+    if (options.method === "POST") state = { messages: [], pending: pending(), observation: "current" };
+    return Response.json(state);
+  });
+  const input = ui.elements["message-input"];
+  const enter = () => input.handlers.keydown({ key: "Enter", shiftKey: false, isComposing: false, preventDefault() {} });
+  input.value = "こんにちは";
+  enter();
+  await ui.advance(0);
+  assert.equal(ui.submit.type, "button");
+  input.value = "次の質問の下書き";
+  input.handlers.input();
+  enter();
+  await ui.advance(0);
+  assert.equal(input.value, "次の質問の下書き");
+  assert.equal(ui.saved.get(DRAFT_KEY), "次の質問の下書き");
+  assert.deepEqual(ui.requests.filter((request) => request.method === "POST").map((request) => request.url), ["/api/messages"]);
 });

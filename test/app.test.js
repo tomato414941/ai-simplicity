@@ -21,6 +21,9 @@ test("serves the current interface and validates requests without an old API mod
   for (const [, id] of script.matchAll(/document.querySelector\("#([\w-]+)"\)/g)) assert.ok(html.includes(`id="${id}"`));
   assert.match(html, /<title>AI<\/title>/);
   assert.match(html, /placeholder="話す"/);
+  assert.doesNotMatch(html, /id="stop-generation"/);
+  const composer = html.split('<form id="composer"')[1].split("</form>")[0];
+  assert.equal([...composer.matchAll(/<button\b/g)].length, 1);
   for (const body of [null, [], { text: "old request" }, { id: "first", text: " " }, { id: "invalid:id", text: "Hi" }]) {
     const response = await fetch(base + "/api/messages", { method: "POST", body: JSON.stringify(body) });
     assert.equal(response.status, 400);

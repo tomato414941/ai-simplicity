@@ -1,12 +1,12 @@
 const messagesElement = document.querySelector("#messages");
 const form = document.querySelector("#composer");
 const input = document.querySelector("#message-input");
-const submitButton = form.querySelector("button");
+const composerButton = form.querySelector("button");
+const composerIcon = composerButton.querySelector("path");
 const statusElement = document.querySelector("#reply-status");
 const statusText = document.querySelector("#status-text");
 const statusIndicator = document.querySelector("#status-indicator");
 const statusAction = document.querySelector("#status-action");
-const stopButton = document.querySelector("#stop-generation");
 const PENDING_KEY = "ai-simplicity.pending";
 const DRAFT_KEY = "ai-simplicity.draft";
 const RECOVERY_WINDOW_MS = 60_000;
@@ -60,7 +60,7 @@ statusAction.addEventListener("click", () => {
   }
 });
 
-stopButton.addEventListener("click", () => {
+composerButton.addEventListener("click", () => {
   if (!operation && snapshot.pending?.status === "processing" && !snapshot.pending.stopRequested) {
     void post("/api/stop", { id: snapshot.pending.id });
   }
@@ -70,7 +70,7 @@ input.addEventListener("input", () => { resizeInput(); saveDraft(); });
 input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    form.requestSubmit();
+    if (!snapshot.pending && !outbox) form.requestSubmit();
   }
 });
 
@@ -230,9 +230,16 @@ function render() {
   statusAction.hidden = !button;
   statusAction.textContent = button;
   statusAction.disabled = Boolean(operation);
-  stopButton.hidden = snapshot.pending?.status !== "processing" || Boolean(stopping);
-  stopButton.disabled = Boolean(operation);
-  submitButton.disabled = Boolean(operation) || loading || Boolean(pending) || !connected;
+  const generating = pending?.status === "processing";
+  const buttonLabel = generating ? (stopping ? "停止中" : "停止") : "送る";
+  composerButton.type = generating ? "button" : "submit";
+  composerButton.setAttribute("aria-label", buttonLabel);
+  composerButton.setAttribute("title", buttonLabel);
+  composerIcon.setAttribute("d", generating ? "M8 8h8v8H8z" : "M5 12h13m-5-5 5 5-5 5");
+  composerIcon.setAttribute("fill", generating ? "currentColor" : "none");
+  composerButton.disabled = Boolean(operation) || loading || (generating
+    ? !snapshot.pending || Boolean(stopping)
+    : Boolean(pending) || !connected);
   if (nearBottom) requestAnimationFrame(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" }));
 }
 
