@@ -19,7 +19,13 @@
         class="messages"
         aria-label="会話"
         aria-live="polite"
-      ></section>
+      >
+        <div id="reply-status" class="reply-status" role="status" hidden>
+          <span id="status-indicator" class="thinking" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span id="status-text"></span>
+          <button id="status-action" type="button" hidden></button>
+        </div>
+      </section>
 
       <form id="composer" class="composer">
         <label class="visually-hidden" for="message-input">メッセージ</label>

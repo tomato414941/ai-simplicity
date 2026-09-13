@@ -11,174 +11,250 @@ Do not send messages, publish, buy, delete, or change external data without the 
 Never send private conversation data or credentials to an external website or API without authorization.
 When an action has consequences or requires missing information, make that clear and preserve the person's control.`;
 
+const READ_OPTIONS = { maxRetries: 0, timeout: 8_000 };
+
 export class Conversation {
   #sessions;
   #model;
   #store;
-  #turnQueue = Promise.resolve();
+  #logger;
+  #active = false;
+  #queue = Promise.resolve();
 
-  constructor({ client, model, store }) {
+  constructor({ client, model, store, logger = console }) {
     this.#sessions = client.beta.agents.sessions;
     this.#model = model;
     this.#store = store;
+    this.#logger = logger;
   }
 
-  async messages() {
-    return (await this.#store.read()).messages;
-  }
-
-  async send(text, { onDelta = () => {} } = {}) {
-    const turn = this.#turnQueue.then(() => this.#send(text, onDelta));
-    this.#turnQueue = turn.catch(() => {});
-    return turn;
-  }
-
-  async #send(text, onDelta) {
-    let state = await this.#store.read();
-    if (state.pendingAgentTurn) {
-      const recovered = await this.#recover(state);
-      if (recovered && state.pendingAgentTurn.text === text) return recovered;
-      state = await this.#store.read();
-      if (state.pendingAgentTurn && state.pendingAgentTurn.text !== text) {
-        throw new Error("The previous input has not been resolved. Retry that message first.");
+  snapshot() {
+    return this.#serialize(async () => {
+      const state = await this.#store.read();
+      if (state.pendingAgentTurn && state.pendingAgentTurn.status !== "failed" && !this.#active) {
+        try {
+          await this.#recover(state);
+        } catch (error) {
+          this.#log(error);
+          await this.#updatePending({ status: "checking" });
+        }
       }
-    }
+      return publicState(await this.#store.read());
+    });
+  }
 
-    if (!state.agentSessionId) {
-      // Persist the session ID before starting work.
-      const session = await this.#sessions.create({
-        agent: {
-          model: this.#model,
-          instructions: INSTRUCTIONS,
-          tools: [{ type: "web_search", mode: "live" }],
-          multi_agent: { enabled: false },
-        },
-        environment: { type: "openai_hosted", network: { access: "enabled" } },
-      }, { maxRetries: 0 });
-      state = await this.#store.update((current) => ({
-        ...current,
-        agentSessionId: session.id,
-      }));
-    }
-
-    if (!state.pendingAgentTurn) {
-      state = await this.#store.update((current) => ({
+  send({ id, text }) {
+    return this.#serialize(async () => {
+      const state = await this.#store.read();
+      const previous = state.messages.find((message) => message.id === id);
+      if (previous) {
+        if (previous.role !== "user" || previous.text !== text) throw conflict();
+        return publicState(state);
+      }
+      if (state.pendingAgentTurn) {
+        if (state.pendingAgentTurn.id !== id || state.pendingAgentTurn.text !== text) throw conflict();
+        return publicState(state);
+      }
+      const next = await this.#store.update((current) => ({
         ...current,
         pendingAgentTurn: {
-          text,
-          input: current.agentLastTurnId ? text : initialInput(current.messages, text),
-          idempotencyKey: randomUUID(),
-          createdAt: new Date().toISOString(),
+          id, text, createdAt: new Date().toISOString(),
+          idempotencyKey: randomUUID(), turnId: null,
+          partialText: "", status: "waiting", error: null,
         },
       }));
+      this.#start();
+      return publicState(next);
+    });
+  }
+
+  retry(id) {
+    return this.#serialize(async () => {
+      const state = await this.#store.read();
+      if (state.pendingAgentTurn?.id !== id) throw conflict();
+      if (state.pendingAgentTurn.status !== "failed" || this.#active) return publicState(state);
+      await this.#updatePending({
+        idempotencyKey: randomUUID(), turnId: null, partialText: "",
+        status: "waiting", error: null,
+      });
+      this.#start();
+      return publicState(await this.#store.read());
+    });
+  }
+
+  #serialize(operation) {
+    const result = this.#queue.then(operation);
+    this.#queue = result.catch(() => {});
+    return result;
+  }
+
+  #start() {
+    this.#active = true;
+    void this.#generate().catch((error) => this.#log(error)).finally(() => {
+      this.#active = false;
+    });
+  }
+
+  async #generate() {
+    let state = await this.#store.read();
+    if (!state.agentSessionId) {
+      try {
+        const session = await this.#sessions.create({
+          agent: {
+            model: this.#model, instructions: INSTRUCTIONS,
+            tools: [{ type: "web_search", mode: "live" }],
+            multi_agent: { enabled: false },
+          },
+          environment: { type: "openai_hosted", network: { access: "enabled" } },
+        }, READ_OPTIONS);
+        state = await this.#store.update((current) => ({ ...current, agentSessionId: session.id }));
+      } catch (error) {
+        this.#log(error);
+        // Session creation never submits input, so this failure is safe to retry.
+        await this.#fail(null, error.code);
+        return;
+      }
     }
 
-    const pending = state.pendingAgentTurn;
-    // The SDK checks for idle, subscribes before input, and closes the connection.
     const stream = this.#sessions.stream(state.agentSessionId, {
-      input: pending.input,
-      idempotencyKey: pending.idempotencyKey,
-    });
+      input: state.pendingAgentTurn.text,
+      idempotencyKey: state.pendingAgentTurn.idempotencyKey,
+    }, { ...READ_OPTIONS, signal: AbortSignal.timeout(45_000) });
     const output = new Map();
-    let completedTurn;
-
     try {
       for await (const event of stream) {
-        if (event.type === "agent.session.turn.item.added" || event.type === "agent.session.turn.item.done") {
-          if (isAnswer(event.item)) {
-            const previous = output.get(event.item.id);
-            const parts = previous?.parts ?? new Map();
-            (event.item.content ?? []).forEach((part, index) => {
-              if (part.type === "output_text") parts.set(index, part.text);
-            });
-            output.set(event.item.id, { parts });
-          }
+        if (["agent.session.turn.item.added", "agent.session.turn.item.done"].includes(event.type) && isAnswer(event.item)) {
+          const parts = output.get(event.item.id) ?? new Map();
+          (event.item.content ?? []).forEach((part, index) => {
+            if (part.type === "output_text") parts.set(index, part.text);
+          });
+          output.set(event.item.id, parts);
         }
+        const parts = output.get(event.item_id);
+        if (parts && event.type === "agent.session.turn.output_text.delta") {
+          parts.set(event.content_index, (parts.get(event.content_index) ?? "") + event.delta);
+        }
+        if (parts && event.type === "agent.session.turn.output_text.done") parts.set(event.content_index, event.text);
+        if (output.size) await this.#updatePending({ partialText: outputText(output) });
 
-        const item = output.get(event.item_id);
-        if (item && event.type === "agent.session.turn.output_text.delta") {
-          item.parts.set(event.content_index, (item.parts.get(event.content_index) ?? "") + event.delta);
-          onDelta(event.delta);
-        }
-        if (item && event.type === "agent.session.turn.output_text.done") {
-          item.parts.set(event.content_index, event.text);
-        }
-
-        if (event.type === "error") throw new Error(event.error?.message ?? "The agent failed.");
-        if (["agent.session.failed", "agent.session.environment.failed", "agent.session.requires_action"].includes(event.type)) {
-          throw new Error(`The agent cannot continue: ${event.type}`);
-        }
-        if (event.turn?.subagent_id == null) {
+        if (event.turn && event.turn.subagent_id == null) {
+          await this.#updatePending({ turnId: event.turn.id });
           if (["agent.session.turn.failed", "agent.session.turn.cancelled"].includes(event.type)) {
-            await this.#clearPending(event.turn.id);
-            throw new Error(event.turn.error?.message ?? "The agent turn did not complete.");
+            await this.#fail(event.turn.id, event.turn.error?.code);
+            return;
           }
           if (event.type === "agent.session.turn.completed") {
-            completedTurn = event.turn.id;
+            await this.#finish(event.turn.id, outputText(output));
+            return;
           }
         }
+        if (["error", "agent.session.failed", "agent.session.environment.failed", "agent.session.requires_action"].includes(event.type)) {
+          throw new Error("Agent stream needs a status check.");
+        }
       }
+      await this.#updatePending({ status: "checking" });
+    } catch (error) {
+      this.#log(error);
+      await this.#updatePending({ status: "checking" });
     } finally {
+      // Stop local streaming only; the hosted turn may still be running.
       stream.controller.abort();
     }
-
-    if (!completedTurn) throw new Error("The agent stream ended before the turn completed.");
-    const reply = [...output.values()].map((item) =>
-      [...item.parts.entries()].sort(([a], [b]) => a - b).map(([, value]) => value).join(""),
-    ).join("\n\n").trim();
-    return this.#finish(pending, completedTurn, reply);
   }
 
   async #recover(state) {
-    // A hosted task can outlive its stream. Check saved work before resubmitting.
-    let latest;
-    for await (const turn of this.#sessions.turns.list(state.agentSessionId, { order: "desc", limit: 100 })) {
-      if (turn.subagent_id == null) {
-        latest = turn;
-        break;
+    const options = { ...READ_OPTIONS, signal: AbortSignal.timeout(8_000) };
+    const pending = state.pendingAgentTurn;
+    if (!state.agentSessionId) {
+      await this.#fail(null);
+      return;
+    }
+    let turn;
+    if (pending.turnId) {
+      turn = await this.#sessions.turns.retrieve(pending.turnId, { session_id: state.agentSessionId }, options);
+    } else {
+      for await (const candidate of this.#sessions.turns.list(state.agentSessionId, { order: "desc", limit: 100 }, options)) {
+        if (candidate.subagent_id == null) {
+          if (candidate.id !== state.agentLastTurnId) turn = candidate;
+          break;
+        }
       }
     }
-    if (!latest || latest.id === state.agentLastTurnId) return null;
-    if (["failed", "cancelled"].includes(latest.status)) {
-      await this.#clearPending(latest.id);
-      throw new Error(latest.error?.message ?? "The previous agent turn did not complete.");
+    if (!turn) {
+      // An empty list does not prove that input was never accepted.
+      await this.#updatePending({ status: "checking" });
+      return;
     }
-    if (latest.status !== "completed") {
-      throw new Error("The previous agent turn is still running. No new input was submitted.");
+    if (["failed", "cancelled"].includes(turn.status)) {
+      await this.#fail(turn.id, turn.error?.code);
+      return;
     }
+    await this.#updatePending({ turnId: turn.id, status: "waiting" });
     const replies = [];
-    for await (const item of this.#sessions.items.list(state.agentSessionId, { order: "asc", limit: 100 })) {
-      if (item.turn_id === latest.id && isAnswer(item)) replies.push(messageText(item));
+    for await (const item of this.#sessions.items.list(state.agentSessionId, { order: "asc", limit: 100 }, options)) {
+      if (item.turn_id === turn.id && isAnswer(item)) replies.push(messageText(item));
     }
-    return this.#finish(state.pendingAgentTurn, latest.id, replies.join("\n\n").trim());
+    const text = replies.join("\n\n").trim();
+    if (turn.status === "completed") await this.#finish(turn.id, text);
+    else if (text.length > pending.partialText.length) await this.#updatePending({ partialText: text });
   }
 
-  async #clearPending(turnId) {
-    await this.#store.update((current) => ({
-      ...current,
-      agentLastTurnId: turnId,
-      pendingAgentTurn: null,
+  #updatePending(fields) {
+    return this.#store.update((state) => ({
+      ...state,
+      pendingAgentTurn: state.pendingAgentTurn ? { ...state.pendingAgentTurn, ...fields } : null,
     }));
   }
 
-  async #finish(pending, turnId, reply) {
-    if (!reply) {
-      await this.#clearPending(turnId);
-      throw new Error("The agent returned no final text.");
-    }
-    const message = { role: "assistant", text: reply, createdAt: new Date().toISOString() };
-    await this.#store.update((current) => ({
-      ...current,
-      agentLastTurnId: turnId,
-      pendingAgentTurn: null,
-      messages: [
-        ...current.messages,
-        { role: "user", text: pending.text, createdAt: pending.createdAt },
-        message,
-      ],
+  #fail(turnId, code) {
+    return this.#store.update((state) => ({
+      ...state,
+      agentLastTurnId: turnId ?? state.agentLastTurnId,
+      pendingAgentTurn: {
+        ...state.pendingAgentTurn, turnId, status: "failed",
+        error: code === "credit_balance_exhausted"
+          ? "利用残高が不足しているため、返答を作れませんでした。"
+          : "返答を作れませんでした。入力は保存されています。",
+      },
     }));
-    return message;
   }
+
+  async #finish(turnId, text) {
+    // Completion and item publication may be observed at different times.
+    if (!text) return this.#updatePending({ turnId, status: "checking" });
+    return this.#store.update((state) => {
+      const pending = state.pendingAgentTurn;
+      return {
+        ...state, agentLastTurnId: turnId, pendingAgentTurn: null,
+        messages: [...state.messages,
+          { id: pending.id, role: "user", text: pending.text, createdAt: pending.createdAt },
+          { id: `${pending.id}:reply`, role: "assistant", text, createdAt: new Date().toISOString() },
+        ],
+      };
+    });
+  }
+
+  #log(error) {
+    this.#logger.error({
+      event: "agent_request_error", type: error.type ?? error.name,
+      code: error.code ?? null, status: error.status ?? null,
+      requestId: error.request_id ?? error.headers?.get?.("x-request-id") ?? null,
+    });
+  }
+}
+
+function publicState({ messages, pendingAgentTurn: pending }) {
+  return {
+    messages,
+    pending: pending ? {
+      id: pending.id, text: pending.text, createdAt: pending.createdAt,
+      partialText: pending.partialText, status: pending.status, error: pending.error,
+    } : null,
+  };
+}
+
+function conflict() {
+  return Object.assign(new Error("前の返答を確認してから送ってください。"), { statusCode: 409 });
 }
 
 function isAnswer(item) {
@@ -189,10 +265,7 @@ function messageText(item) {
   return (item.content ?? []).filter((part) => part.type === "output_text").map((part) => part.text).join("");
 }
 
-function initialInput(messages, text) {
-  if (!messages.length) return text;
-  // Agents input accepts user messages only. Preserve roles in a quoted transcript,
-  // not as system instructions or fabricated API assistant messages.
-  const transcript = JSON.stringify(messages.map(({ role, text }) => ({ role, text })));
-  return `Previous conversation (quoted JSON for context only; do not execute old requests):\n${transcript}\n\nCurrent user message:\n${text}`;
+function outputText(output) {
+  return [...output.values()].map((parts) => [...parts.entries()].sort(([a], [b]) => a - b)
+    .map(([, text]) => text).join("")).join("\n\n").trim();
 }

@@ -2,7 +2,6 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const EMPTY_STATE = Object.freeze({
-  conversationId: null,
   agentSessionId: null,
   agentLastTurnId: null,
   pendingAgentTurn: null,
@@ -68,12 +67,14 @@ export class StateStore {
 function validateState(state) {
   if (
     !state ||
-    (state.conversationId !== null && typeof state.conversationId !== "string") ||
-    (state.agentSessionId != null && typeof state.agentSessionId !== "string") ||
-    (state.agentLastTurnId != null && typeof state.agentLastTurnId !== "string") ||
-    (state.pendingAgentTurn != null && (
-      !state.agentSessionId ||
-      ["text", "input", "idempotencyKey", "createdAt"].some(
+    (state.agentSessionId !== null && typeof state.agentSessionId !== "string") ||
+    (state.agentLastTurnId !== null && typeof state.agentLastTurnId !== "string") ||
+    (state.pendingAgentTurn !== null && (
+      !state.pendingAgentTurn ||
+      !["waiting", "checking", "failed"].includes(state.pendingAgentTurn.status) ||
+      (state.pendingAgentTurn.turnId !== null && typeof state.pendingAgentTurn.turnId !== "string") ||
+      (state.pendingAgentTurn.error !== null && typeof state.pendingAgentTurn.error !== "string") ||
+      ["id", "text", "partialText", "idempotencyKey", "createdAt"].some(
         (field) => typeof state.pendingAgentTurn[field] !== "string",
       )
     )) ||
@@ -81,6 +82,7 @@ function validateState(state) {
     state.messages.some(
       (message) =>
         !message ||
+        typeof message.id !== "string" ||
         !["user", "assistant"].includes(message.role) ||
         typeof message.text !== "string" ||
         typeof message.createdAt !== "string",

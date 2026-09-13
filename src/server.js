@@ -23,22 +23,30 @@ export function createServer({ conversation, logger = console }) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/messages") {
-        const messages = await conversation.messages();
-        return sendJson(response, 200, { messages });
+        return sendJson(response, 200, await conversation.snapshot());
       }
 
       if (request.method === "POST" && url.pathname === "/api/messages") {
         const body = await readJson(request);
+        if (typeof body.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(body.id)) {
+          return sendJson(response, 400, { error: "送信内容を確認できませんでした。" });
+        }
         const text = typeof body.text === "string" ? body.text.trim() : "";
 
         if (!text) {
-          return sendJson(response, 400, { error: "Message text is required." });
+          return sendJson(response, 400, { error: "メッセージを入力してください。" });
         }
         if (text.length > MAX_MESSAGE_CHARACTERS) {
-          return sendJson(response, 400, { error: "Message text is too long." });
+          return sendJson(response, 400, { error: "メッセージを短くしてください。" });
         }
 
-        return streamMessage({ conversation, logger, response, text });
+        return sendJson(response, 202, await conversation.send({ id: body.id, text }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/retry") {
+        const body = await readJson(request);
+        if (typeof body.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(body.id)) return sendJson(response, 400, { error: "送信内容を確認できませんでした。" });
+        return sendJson(response, 202, await conversation.retry(body.id));
       }
 
       if (request.method === "GET") {
@@ -52,46 +60,10 @@ export function createServer({ conversation, logger = console }) {
         logger.error(error);
       }
       sendJson(response, status, {
-        error: status >= 500 ? "The conversation is unavailable right now." : error.message,
+        error: status >= 500 ? "今は会話を確認できません。" : error.message,
       });
     }
   });
-}
-
-async function streamMessage({ conversation, logger, response, text }) {
-  response.writeHead(200, {
-    "content-type": "text/event-stream; charset=utf-8",
-    "cache-control": "no-cache, no-transform",
-    connection: "keep-alive",
-    "x-accel-buffering": "no",
-  });
-  response.flushHeaders();
-  const heartbeat = setInterval(() => {
-    if (!response.destroyed) response.write(": keep-alive\n\n");
-  }, 15_000);
-  heartbeat.unref();
-
-  try {
-    const message = await conversation.send(text, {
-      onDelta(delta) {
-        sendEvent(response, "delta", { text: delta });
-      },
-    });
-    sendEvent(response, "done", { message });
-  } catch (error) {
-    logger.error(error);
-    sendEvent(response, "error", {
-      error: "The conversation is unavailable right now.",
-    });
-  } finally {
-    clearInterval(heartbeat);
-    response.end();
-  }
-}
-
-function sendEvent(response, event, value) {
-  if (response.destroyed) return;
-  response.write(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`);
 }
 
 async function readJson(request) {
@@ -109,7 +81,9 @@ async function readJson(request) {
   }
 
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error();
+    return body;
   } catch {
     const error = new Error("Request body must be valid JSON.");
     error.statusCode = 400;

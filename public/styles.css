@@ -204,14 +204,33 @@ textarea {
   stroke-width: 1.8;
 }
 
-.error-banner {
-  align-self: center;
-  padding: 10px 14px;
-  border: 1px solid rgba(255, 118, 89, 0.28);
-  border-radius: 12px;
-  background: rgba(76, 28, 20, 0.72);
-  color: #ff9b85;
-  font-size: 0.8rem;
+.reply-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+  line-height: 1.7;
+}
+
+.reply-status button {
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--signal);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.reply-status button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 .visually-hidden {
