@@ -355,7 +355,7 @@ function gate(t) {
   return { wait, release };
 }
 
-test("stop keeps partial text, waits for confirmation, and carries a notice only with the next input", async (t) => {
+test("stop keeps partial text, waits for confirmation, and leaves later input unchanged", async (t) => {
   const end = gate(t);
   let turn = 0;
   const events = { async *[Symbol.asyncIterator]() {
@@ -397,12 +397,8 @@ test("stop keeps partial text, waits for confirmation, and carries a notice only
   await resumed.send({ id: "second", text: "A different question" });
   await until(async () => (await resumed.snapshot()).messages.length === 4);
   const input = calls.filter((call) => call.stream)[1].input;
-  assert.equal(input.length, 2);
-  assert.match(input[0].content[0].text, /Application notice, not text typed by the user/);
-  assert.match(input[0].content[0].text, /user's Stop action/);
-  assert.match(input[0].content[0].text, /Original request/);
-  assert.equal(input[1].content[0].text, "A different question");
-  assert.equal((await resumed.snapshot()).messages[2].text, "A different question", "The notice is not forged into the user's displayed text");
+  assert.equal(input, "A different question", "Stopping must not add text or instructions to the next input");
+  assert.equal((await resumed.snapshot()).messages[2].text, "A different question");
   await resumed.send({ id: "third", text: "Another question" });
   await until(async () => (await resumed.snapshot()).messages.length === 6);
   assert.equal(calls.filter((call) => call.stream)[2].input, "Another question");
@@ -480,7 +476,7 @@ test("provider cancellation is not a failed request or an invented user stop", a
   await assert.rejects(conversation.retry("first"), { statusCode: 409 });
   await conversation.send({ id: "second", text: "Next" });
   await settled();
-  assert.match(calls.filter((call) => call.stream)[1].input[0].content[0].text, /no user Stop action was recorded/);
+  assert.equal(calls.filter((call) => call.stream)[1].input, "Next");
 });
 
 test("completion winning a stop race is kept as completion, and late stop clicks cannot touch the next turn", async () => {

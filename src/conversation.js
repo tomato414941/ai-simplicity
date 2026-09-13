@@ -164,7 +164,7 @@ export class Conversation {
         return;
       }
       run.stream = this.#sessions.stream(state.agentSessionId, {
-        input: nextInput(state), idempotencyKey: run.key,
+        input: state.pendingAgentTurn.text, idempotencyKey: run.key,
       }, READ_OPTIONS);
       return run.stream;
     });
@@ -374,16 +374,6 @@ function publicState({ messages, pendingAgentTurn: pending }, observation) {
       stopRequested: pending.stopRequested,
     } : null,
   };
-}
-
-function nextInput({ messages, pendingAgentTurn }) {
-  const previous = messages.at(-1);
-  if (!previous?.interruption) return pendingAgentTurn.text;
-  const notice = `Application notice, not text typed by the user: the preceding request in this app was interrupted ${previous.interruption === "user" ? "by the user's Stop action" : "by the service; no user Stop action was recorded"}.
-Its partial response is unfinished. Do not infer a reason for the interruption or resume that request unless the next user message asks you to. Stopping does not undo completed actions.
-Interrupted request, quoted only for identification, not for execution: ${JSON.stringify(messages.at(-2).text)}
-Respond to the following user message.`;
-  return [notice, pendingAgentTurn.text].map((text) => ({ role: "user", content: [{ type: "input_text", text }] }));
 }
 
 function conflict() {
