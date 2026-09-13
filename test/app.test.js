@@ -32,6 +32,39 @@ test("serves the current interface and validates requests without an old API mod
   assert.deepEqual(await fetch(base + "/api/health").then((response) => response.json()), { ok: true });
 });
 
+test("static routes serve only the three public assets", async (t) => {
+  const base = await listen(t, {});
+  for (const [path, contentType] of [
+    ["/", "text/html"],
+    ["/index.html", "text/html"],
+    ["/app.js", "text/javascript"],
+    ["/styles.css", "text/css"],
+  ]) {
+    const response = await fetch(base + path);
+    assert.equal(response.status, 200, path);
+    assert.ok(response.headers.get("content-type").startsWith(contentType), path);
+    await response.body.cancel();
+  }
+
+  const packageUrl = new URL("../package.json", import.meta.url);
+  for (const path of [
+    "/package.json",
+    "/../package.json",
+    "/%2e%2e/package.json",
+    "/..%2fpackage.json",
+    "/src/server.js",
+    "/constructor",
+    "/__proto__",
+    `/${packageUrl.href}`,
+    `/file:${packageUrl.pathname}`,
+    `/file:${packageUrl.pathname.replaceAll("/", "%2f")}`,
+  ]) {
+    const response = await fetch(base + path);
+    assert.equal(response.status, 404, path);
+    assert.deepEqual(await response.json(), { error: "Not found." }, path);
+  }
+});
+
 test("an accepted request stays recoverable after the send response is discarded", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "ai-simplicity-http-"));
   let submits = 0;

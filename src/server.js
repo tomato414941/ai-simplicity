@@ -1,17 +1,24 @@
 import { createServer as createHttpServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, normalize } from "node:path";
 
 const MAX_BODY_BYTES = 32 * 1024;
 const MAX_MESSAGE_CHARACTERS = 20_000;
-const PUBLIC_DIRECTORY = new URL("../public/", import.meta.url);
-
-const CONTENT_TYPES = {
-  ".css": "text/css; charset=utf-8",
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".svg": "image/svg+xml",
+const INDEX_ASSET = {
+  url: new URL("../public/index.html", import.meta.url),
+  contentType: "text/html; charset=utf-8",
 };
+const PUBLIC_ASSETS = new Map([
+  ["/", INDEX_ASSET],
+  ["/index.html", INDEX_ASSET],
+  ["/app.js", {
+    url: new URL("../public/app.js", import.meta.url),
+    contentType: "text/javascript; charset=utf-8",
+  }],
+  ["/styles.css", {
+    url: new URL("../public/styles.css", import.meta.url),
+    contentType: "text/css; charset=utf-8",
+  }],
+]);
 
 export function createServer({ conversation, logger = console }) {
   return createHttpServer(async (request, response) => {
@@ -56,7 +63,7 @@ export function createServer({ conversation, logger = console }) {
       }
 
       if (request.method === "GET") {
-        return serveStatic(url.pathname, response);
+        return await serveStatic(url.pathname, response);
       }
 
       sendJson(response, 404, { error: "Not found." });
@@ -98,13 +105,13 @@ async function readJson(request) {
 }
 
 async function serveStatic(pathname, response) {
-  const requestedPath = pathname === "/" ? "index.html" : pathname.slice(1);
-  const safePath = normalize(requestedPath).replace(/^(\.\.(\/|\\|$))+/, "");
+  const asset = PUBLIC_ASSETS.get(pathname);
+  if (!asset) return sendJson(response, 404, { error: "Not found." });
 
   try {
-    const content = await readFile(new URL(safePath, PUBLIC_DIRECTORY));
+    const content = await readFile(asset.url);
     response.writeHead(200, {
-      "content-type": CONTENT_TYPES[extname(safePath)] ?? "application/octet-stream",
+      "content-type": asset.contentType,
       "cache-control": "no-cache",
     });
     response.end(content);
