@@ -49,6 +49,12 @@ export function createServer({ conversation, logger = console }) {
         return sendJson(response, 202, await conversation.retry(body.id));
       }
 
+      if (request.method === "POST" && url.pathname === "/api/stop") {
+        const body = await readJson(request);
+        if (typeof body.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(body.id)) return sendJson(response, 400, { error: "送信内容を確認できませんでした。" });
+        return sendJson(response, 202, await conversation.stop(body.id));
+      }
+
       if (request.method === "GET") {
         return serveStatic(url.pathname, response);
       }

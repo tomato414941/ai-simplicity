@@ -6,6 +6,7 @@ const statusElement = document.querySelector("#reply-status");
 const statusText = document.querySelector("#status-text");
 const statusIndicator = document.querySelector("#status-indicator");
 const statusAction = document.querySelector("#status-action");
+const stopButton = document.querySelector("#stop-generation");
 const PENDING_KEY = "ai-simplicity.pending";
 const DRAFT_KEY = "ai-simplicity.draft";
 const RECOVERY_WINDOW_MS = 60_000;
@@ -16,7 +17,8 @@ const articles = new Map();
 let snapshot = { messages: [], pending: null, observation: "current" };
 let outbox = readSavedPending();
 let loading = true;
-let busy = false;
+let operation = null;
+let checkController;
 let connected = false;
 let unavailableSince = null;
 let notice = "";
@@ -29,10 +31,10 @@ resizeInput();
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = input.value.trim();
-  if (!text || busy || loading || !connected || snapshot.pending || outbox) return;
+  if (!text || operation || loading || !connected || snapshot.pending || outbox) return;
   const pending = {
     id: crypto.randomUUID(), text, createdAt: new Date().toISOString(),
-    partialText: "", status: "processing", error: null,
+    partialText: "", status: "processing", error: null, stopRequested: false,
   };
   try {
     localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
@@ -49,12 +51,18 @@ form.addEventListener("submit", (event) => {
 });
 
 statusAction.addEventListener("click", () => {
-  if (busy) return;
+  if (operation) return;
   if (action === "retry") void post("/api/retry", { id: snapshot.pending.id });
   else if (action === "send") void post("/api/messages", { id: outbox.id, text: outbox.text });
   else {
     unavailableSince = Date.now();
     void check();
+  }
+});
+
+stopButton.addEventListener("click", () => {
+  if (!operation && snapshot.pending?.status === "processing" && !snapshot.pending.stopRequested) {
+    void post("/api/stop", { id: snapshot.pending.id });
   }
 });
 
@@ -71,7 +79,8 @@ input.focus();
 
 async function post(url, body) {
   clearTimeout(timer);
-  busy = true;
+  checkController?.abort();
+  operation = url;
   unavailableSince = null;
   notice = "";
   render();
@@ -80,6 +89,7 @@ async function post(url, body) {
   } catch (error) {
     connected = false;
     unavailableSince ??= Date.now();
+    if (url === "/api/stop") notice = "停止を確認できませんでした。もう一度お試しください。";
     if (error.status >= 400 && error.status < 500 && url === "/api/messages" && !snapshot.pending) {
       // A definite rejection is not an ambiguous delivery failure.
       input.value = outbox.text;
@@ -90,26 +100,32 @@ async function post(url, body) {
       notice = "送れませんでした。入力を残してあります。";
     }
   } finally {
-    busy = false;
+    operation = null;
   }
   await check();
 }
 
 async function check() {
+  if (operation) return;
   clearTimeout(timer);
   const remaining = recoveryRemaining();
   if (remaining <= 0) { render(); return; }
-  busy = true;
+  checkController?.abort();
+  const controller = new AbortController();
+  checkController = controller;
   render();
   try {
-    applySnapshot(await request("/api/messages", {
-      signal: AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, remaining)),
-    }));
+    const next = await request("/api/messages", {
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, remaining))]),
+    });
+    if (controller.signal.aborted) return;
+    applySnapshot(next);
   } catch {
+    if (controller.signal.aborted) return;
     connected = false;
     unavailableSince ??= Date.now();
   } finally {
-    busy = false;
+    if (checkController === controller) checkController = null;
   }
 
   const pending = snapshot.pending ?? outbox;
@@ -147,6 +163,7 @@ function applySnapshot(next) {
   }
   const unavailable = next.observation === "unavailable" || Boolean(outbox && !next.pending);
   unavailableSince = unavailable ? (unavailableSince ?? Date.now()) : null;
+  if (next.pending?.stopRequested || (!next.pending && !outbox)) notice = "";
   savePending();
 }
 
@@ -168,20 +185,29 @@ function render() {
       article = document.createElement("article");
       article.className = `message ${message.role}`;
       article.append(document.createElement("p"));
+      const ending = document.createElement("small");
+      ending.className = "message-ending";
+      article.append(ending);
       messagesElement.insertBefore(article, statusElement);
       articles.set(message.id, article);
     }
     const paragraph = article.querySelector("p");
     if (paragraph.textContent !== message.text) paragraph.textContent = message.text;
+    paragraph.hidden = !message.text;
+    const ending = article.querySelector("small");
+    ending.hidden = !message.interruption;
+    ending.textContent = message.interruption ? "停止しました" : "";
   }
 
   let label = notice;
   let button = "";
+  const stopping = pending?.stopRequested || operation === "/api/stop";
   action = "check";
   if (unavailableSince !== null) {
-    label = pending ? "返答の状態を確認しています" : "会話を読み込んでいます";
+    label = stopping ? "停止の状態を確認しています" : (pending ? "返答の状態を確認しています" : "会話を読み込んでいます");
     if (recoveryRemaining() === 0) {
-      label = pending ? "今は返答を確認できません。入力は保存されています。" : "今は会話を読み込めません。";
+      label = stopping ? "今は停止を確認できません。途中の返答は保存されています。"
+        : (pending ? "今は返答を確認できません。入力は保存されています。" : "今は会話を読み込めません。");
       button = "もう一度確認";
       if (connected && outbox && !snapshot.pending) {
         label = "送信を確認できませんでした。入力はこの端末に保存されています。";
@@ -194,7 +220,7 @@ function render() {
     button = "再試行";
     action = "retry";
   } else if (pending) {
-    label = "返答を待っています";
+    label = stopping ? "停止しています" : (notice || "返答を待っています");
   } else if (loading) {
     label = "会話を読み込んでいます";
   }
@@ -203,8 +229,10 @@ function render() {
   statusIndicator.hidden = Boolean(button || notice || !label);
   statusAction.hidden = !button;
   statusAction.textContent = button;
-  statusAction.disabled = busy;
-  submitButton.disabled = busy || loading || Boolean(pending) || !connected;
+  statusAction.disabled = Boolean(operation);
+  stopButton.hidden = snapshot.pending?.status !== "processing" || Boolean(stopping);
+  stopButton.disabled = Boolean(operation);
+  submitButton.disabled = Boolean(operation) || loading || Boolean(pending) || !connected;
   if (nearBottom) requestAnimationFrame(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" }));
 }
 

@@ -36,8 +36,10 @@ async function setup(events = [itemDone("Hello"), terminal()]) {
   };
   const config = { client: { beta: { agents: { sessions } } }, model: "test-model", store, logger: { error: (error) => errors.push(error) } };
   const conversation = new Conversation(config);
+  let settledStreams = 0;
   async function settled() {
-    await until(() => controllers.length > 0 && controllers.every((controller) => controller.signal.aborted));
+    const expected = ++settledStreams;
+    await until(() => controllers.length >= expected && controllers.every((controller) => controller.signal.aborted));
     await new Promise((resolve) => setImmediate(resolve));
   }
   return { conversation, sessions, store, calls, controllers, path, config, settled, errors };
@@ -224,7 +226,7 @@ test("a turn waiting for external input is not mistaken for normal generation", 
   assert.equal(calls.filter((call) => call.stream).length, 1);
 });
 
-for (const status of ["failed", "cancelled"]) {
+for (const status of ["failed"]) {
   test(`only an explicit retry restarts a confirmed ${status} turn`, async () => {
     const events = [itemDone("Partial"), terminal(status)];
     const { conversation, settled, calls } = await setup(events);
@@ -344,4 +346,202 @@ test("official SDK server-error streams recover from completed turns with no sec
   assert.equal(errors[0].code, "internal_error");
   assert.equal(errors[0].requestId, "req_test");
   assert.equal(errors[0].headers, undefined);
+});
+
+function gate(t) {
+  let release;
+  const wait = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  return { wait, release };
+}
+
+test("stop keeps partial text, waits for confirmation, and carries a notice only with the next input", async (t) => {
+  const end = gate(t);
+  let turn = 0;
+  const events = { async *[Symbol.asyncIterator]() {
+    if (++turn === 1) {
+      yield terminal("created");
+      yield itemDone("Partial");
+      await end.wait;
+      yield terminal("cancelled");
+    } else { yield itemDone("Next reply"); yield terminal("completed", "turn_2"); }
+  } };
+  const { conversation, sessions, store, calls, settled, config, path } = await setup(events);
+  sessions.events = { create: async (sessionId, request, options) => {
+    calls.push({ cancel: sessionId, request, options });
+    assert.equal((await store.read()).pendingAgentTurn.stopRequested, true);
+  } };
+  sessions.turns.retrieve = async () => ({ id: "turn_1", status: "in_progress" });
+  await conversation.send({ id: "first", text: "Original request" });
+  await until(async () => (await store.read()).pendingAgentTurn.partialText === "Partial");
+  assert.equal((await conversation.stop("first")).pending.stopRequested, true);
+  const stopping = await conversation.snapshot();
+  assert.equal(stopping.pending.status, "processing");
+  assert.equal(stopping.pending.partialText, "Partial");
+  assert.deepEqual(stopping.messages, []);
+  await conversation.stop("first");
+  await conversation.snapshot();
+  assert.equal(calls.filter((call) => call.cancel).length, 1);
+  assert.deepEqual(calls.find((call) => call.cancel).request, { events: [{ type: "agent.session.input.cancel" }] });
+  assert.equal(calls.find((call) => call.cancel).options.maxRetries, 0);
+  await assert.rejects(conversation.send({ id: "second", text: "Too soon" }), { statusCode: 409 });
+  end.release();
+  await settled();
+  const stopped = await conversation.snapshot();
+  assert.equal(stopped.pending, null);
+  assert.equal(stopped.messages[1].text, "Partial");
+  assert.equal(stopped.messages[1].interruption, "user");
+  await assert.rejects(conversation.retry("first"), { statusCode: 409 });
+  assert.equal(calls.filter((call) => call.stream).length, 1, "Stopping itself must not generate an acknowledgement");
+  const resumed = new Conversation({ ...config, store: new StateStore(path) });
+  await resumed.send({ id: "second", text: "A different question" });
+  await until(async () => (await resumed.snapshot()).messages.length === 4);
+  const input = calls.filter((call) => call.stream)[1].input;
+  assert.equal(input.length, 2);
+  assert.match(input[0].content[0].text, /Application notice, not text typed by the user/);
+  assert.match(input[0].content[0].text, /user's Stop action/);
+  assert.match(input[0].content[0].text, /Original request/);
+  assert.equal(input[1].content[0].text, "A different question");
+  assert.equal((await resumed.snapshot()).messages[2].text, "A different question", "The notice is not forged into the user's displayed text");
+  await resumed.send({ id: "third", text: "Another question" });
+  await until(async () => (await resumed.snapshot()).messages.length === 6);
+  assert.equal(calls.filter((call) => call.stream)[2].input, "Another question");
+});
+
+test("stop before session creation completes never submits input or invents output", async (t) => {
+  const creation = gate(t);
+  const { conversation, sessions, calls, store } = await setup();
+  sessions.create = async () => { await creation.wait; return { id: "sess_test" }; };
+  await conversation.send({ id: "first", text: "Do not start this" });
+  await conversation.stop("first");
+  assert.equal((await conversation.snapshot()).pending.stopRequested, true);
+  creation.release();
+  await until(async () => (await store.read()).messages.length === 2);
+  const state = await conversation.snapshot();
+  assert.equal(state.pending, null);
+  assert.equal(state.messages[1].text, "");
+  assert.equal(state.messages[1].interruption, "user");
+  assert.equal(calls.filter((call) => call.stream).length, 0);
+});
+
+test("an early stop waits for the new turn identity instead of cancelling the previous turn", async (t) => {
+  const created = gate(t);
+  const { conversation, sessions, store, calls, controllers, settled } = await setup((async function* () {
+    await created.wait;
+    yield terminal("created");
+    yield terminal("cancelled");
+  })());
+  await store.update((state) => ({ ...state, agentSessionId: "sess_test", agentLastTurnId: "previous_turn" }));
+  sessions.turns.list = async function* () { yield { id: "previous_turn", subagent_id: null, status: "completed" }; };
+  sessions.events = { create: async () => { calls.push({ cancel: true }); } };
+  await conversation.send({ id: "first", text: "Hello" });
+  await until(() => controllers.length === 1);
+  await conversation.stop("first");
+  await conversation.snapshot();
+  assert.equal(calls.filter((call) => call.cancel).length, 0);
+  created.release();
+  await settled();
+  assert.equal(calls.filter((call) => call.cancel).length, 1);
+  assert.equal((await conversation.snapshot()).messages[1].interruption, "user");
+});
+
+test("a persisted stop survives an upstream error and restart without resubmitting the message", async () => {
+  const { conversation, sessions, store, calls, config, path, settled } = await setup([terminal("created"), itemDone("Partial")]);
+  await conversation.send({ id: "first", text: "Hello" });
+  await settled();
+  let status = "in_progress";
+  sessions.turns.retrieve = async () => ({ id: "turn_1", status });
+  sessions.events = { create: async () => { throw new Error("Private cancellation error"); } };
+  await conversation.stop("first");
+  const unknown = await conversation.snapshot();
+  assert.equal(unknown.observation, "unavailable");
+  assert.equal(unknown.pending.stopRequested, true);
+  assert.equal(unknown.pending.status, "processing");
+  assert.equal((await store.read()).messages.length, 0);
+  const resumed = new Conversation({ ...config, store: new StateStore(path) });
+  sessions.events.create = async () => { calls.push({ cancel: true }); status = "cancelled"; };
+  await resumed.snapshot();
+  sessions.items.list = async function* () { throw new Error("Items unavailable"); };
+  const stopped = await resumed.snapshot();
+  assert.equal(stopped.pending, null);
+  assert.equal(stopped.messages[1].text, "Partial");
+  assert.equal(stopped.messages[1].interruption, "user");
+  assert.equal(calls.filter((call) => call.cancel).length, 1);
+  assert.equal(calls.filter((call) => call.stream).length, 1);
+});
+
+test("provider cancellation is not a failed request or an invented user stop", async () => {
+  const { conversation, settled, calls } = await setup([itemDone("Partial"), terminal("cancelled")]);
+  await conversation.send({ id: "first", text: "Hello" });
+  await settled();
+  const state = await conversation.snapshot();
+  assert.equal(state.pending, null);
+  assert.equal(state.messages[1].interruption, "provider");
+  await assert.rejects(conversation.retry("first"), { statusCode: 409 });
+  await conversation.send({ id: "second", text: "Next" });
+  await settled();
+  assert.match(calls.filter((call) => call.stream)[1].input[0].content[0].text, /no user Stop action was recorded/);
+});
+
+test("completion winning a stop race is kept as completion, and late stop clicks cannot touch the next turn", async () => {
+  const { conversation, sessions, settled, calls } = await setup([terminal("created"), itemDone("Partial")]);
+  await conversation.send({ id: "first", text: "Hello" });
+  await settled();
+  sessions.events = { create: async () => { calls.push({ cancel: true }); } };
+  sessions.turns.retrieve = async () => ({ id: "turn_1", status: "completed" });
+  sessions.items.list = async function* () { yield answer("Complete"); };
+  await conversation.stop("first");
+  const state = await conversation.snapshot();
+  assert.equal(state.pending, null);
+  assert.equal(state.messages[1].text, "Complete");
+  assert.equal(state.messages[1].interruption, undefined);
+  const cancels = calls.filter((call) => call.cancel).length;
+  await conversation.send({ id: "second", text: "Next" });
+  await settled();
+  await conversation.stop("first");
+  assert.equal(calls.filter((call) => call.cancel).length, cancels);
+  await assert.rejects(conversation.stop("unknown"), { statusCode: 409 });
+});
+
+test("late events from an interrupted stream never overwrite the next request", async (t) => {
+  const late = gate(t);
+  let number = 0;
+  const events = { async *[Symbol.asyncIterator]() {
+    if (++number === 1) {
+      yield terminal("created"); yield itemDone("Partial");
+      await late.wait;
+      yield itemDone("Stale text"); yield terminal();
+    } else { yield itemDone("Next answer"); yield terminal("completed", "turn_2"); }
+  } };
+  const { conversation, sessions, store } = await setup(events);
+  sessions.events = { create: async () => {} };
+  sessions.turns.retrieve = async () => ({ id: "turn_1", status: "cancelled" });
+  await conversation.send({ id: "first", text: "Hello" });
+  await until(async () => (await store.read()).pendingAgentTurn.partialText === "Partial");
+  await conversation.stop("first");
+  await conversation.snapshot();
+  await conversation.send({ id: "second", text: "Next" });
+  await until(async () => (await store.read()).messages.length === 4);
+  late.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual((await conversation.snapshot()).messages.map((message) => message.text), ["Hello", "Partial", "Next", "Next answer"]);
+});
+
+test("a delayed cancellation event preserves text already recovered ahead of the stream", async (t) => {
+  const end = gate(t);
+  const { conversation, sessions, store, settled } = await setup((async function* () {
+    yield terminal("created"); yield itemDone("Partial");
+    await end.wait;
+    yield terminal("cancelled");
+  })());
+  sessions.events = { create: async () => {} };
+  sessions.turns.retrieve = async () => ({ id: "turn_1", status: "in_progress" });
+  sessions.items.list = async function* () { yield answer("Partial text recovered from saved work"); };
+  await conversation.send({ id: "first", text: "Hello" });
+  await until(async () => (await store.read()).pendingAgentTurn.partialText === "Partial");
+  await conversation.stop("first");
+  assert.equal((await conversation.snapshot()).pending.partialText, "Partial text recovered from saved work");
+  end.release();
+  await settled();
+  assert.equal((await conversation.snapshot()).messages[1].text, "Partial text recovered from saved work");
 });

@@ -8,7 +8,7 @@ const PENDING_KEY = "ai-simplicity.pending";
 const DRAFT_KEY = "ai-simplicity.draft";
 const pending = (fields = {}) => ({
   id: "request_1", text: "こんにちは", createdAt: new Date(100_000).toISOString(),
-  partialText: "途中の返答", status: "processing", error: null, ...fields,
+  partialText: "途中の返答", status: "processing", error: null, stopRequested: false, ...fields,
 });
 
 // Small DOM test double: runs the shipped script without browser automation or dependencies.
@@ -26,7 +26,7 @@ class Element {
 }
 
 async function boot(handler, saved = new Map()) {
-  const elements = Object.fromEntries(["messages", "composer", "message-input", "reply-status", "status-text", "status-indicator", "status-action"].map((id) => [id, new Element(id)]));
+  const elements = Object.fromEntries(["messages", "composer", "message-input", "reply-status", "status-text", "status-indicator", "status-action", "stop-generation"].map((id) => [id, new Element(id)]));
   const submit = new Element("button");
   elements.composer.append(submit);
   elements.messages.append(elements["reply-status"]);
@@ -42,7 +42,7 @@ async function boot(handler, saved = new Map()) {
     window: { innerHeight: 1000, scrollY: 0, scrollTo() {} },
     localStorage: { getItem: (key) => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value), removeItem: (key) => saved.delete(key) },
     crypto: { randomUUID: () => "request_1" },
-    Date: Clock, AbortSignal,
+    Date: Clock, AbortSignal, AbortController,
     requestAnimationFrame: (callback) => callback(),
     setTimeout: (callback, delay) => { timers.set(++timerId, { callback, at: time + delay }); return timerId; },
     clearTimeout: (id) => timers.delete(id),
@@ -57,7 +57,7 @@ async function boot(handler, saved = new Map()) {
     elements, submit, saved, requests, timers,
     text: () => elements.messages.children.filter((node) => node.tag === "article").map((node) => node.textContent),
     async send(text) { elements["message-input"].value = text; elements.composer.requestSubmit(); await flush(); },
-    async click() { elements["status-action"].handlers.click(); await flush(); },
+    async click(id = "status-action") { elements[id].handlers.click(); await flush(); },
     async advance(ms) {
       const target = time + ms;
       while (true) {
@@ -268,5 +268,113 @@ test("conversation-load failure has a bounded, usable recovery action", async ()
   await ui.advance(60_000);
   assert.equal(ui.elements["status-text"].textContent, "今は会話を読み込めません。");
   assert.equal(ui.elements["status-action"].disabled, false);
+  assert.equal(ui.timers.size, 0);
+});
+
+const stoppedMessages = (text = "途中の返答") => [
+  { id: "request_1", role: "user", text: "こんにちは" },
+  { id: "request_1:reply", role: "assistant", text, interruption: "user" },
+];
+
+test("stop retains the partial reply and draft, then enables the next input only after confirmation", async () => {
+  let state = { messages: [], pending: pending(), observation: "current" };
+  const ui = await boot(async (url) => {
+    if (url === "/api/stop") state.pending.stopRequested = true;
+    return Response.json(state);
+  }, new Map([[DRAFT_KEY, "次の質問"]]));
+  assert.equal(ui.elements["stop-generation"].hidden, false);
+  await ui.click("stop-generation");
+  assert.equal(ui.elements["status-text"].textContent, "停止しています");
+  assert.equal(ui.elements["stop-generation"].hidden, true);
+  assert.equal(ui.submit.disabled, true);
+  assert.deepEqual(ui.text(), ["こんにちは", "途中の返答"]);
+  assert.equal(ui.elements["message-input"].value, "次の質問");
+  assert.equal(JSON.parse(ui.saved.get(PENDING_KEY)).stopRequested, true);
+  state = { messages: stoppedMessages(), pending: null, observation: "current" };
+  await ui.advance(2000);
+  assert.deepEqual(ui.text(), ["こんにちは", "途中の返答停止しました"]);
+  assert.equal(ui.elements["reply-status"].hidden, true);
+  assert.equal(ui.submit.disabled, false);
+  assert.equal(ui.elements["message-input"].value, "次の質問");
+  assert.equal(ui.saved.has(PENDING_KEY), false);
+  assert.equal(ui.timers.size, 0);
+  assert.deepEqual(ui.requests.filter((request) => request.method === "POST"), [
+    { url: "/api/stop", method: "POST", body: { id: "request_1" } },
+  ]);
+});
+
+test("a lost stop response recovers the recorded intent without another stop or generation", async () => {
+  let state = { messages: [], pending: pending(), observation: "current" };
+  const ui = await boot(async (url) => {
+    if (url === "/api/stop") {
+      state = { messages: [], pending: pending({ stopRequested: true }), observation: "unavailable" };
+      throw new Error("Stop response lost");
+    }
+    return Response.json(state);
+  });
+  await ui.click("stop-generation");
+  assert.equal(ui.elements["status-text"].textContent, "停止の状態を確認しています");
+  await ui.advance(60_000);
+  assert.equal(ui.elements["status-text"].textContent, "今は停止を確認できません。途中の返答は保存されています。");
+  assert.equal(ui.elements["status-action"].textContent, "もう一度確認");
+  assert.equal(ui.submit.disabled, true);
+  assert.deepEqual(ui.text(), ["こんにちは", "途中の返答"]);
+  state = { messages: stoppedMessages(), pending: null, observation: "current" };
+  await ui.click();
+  assert.equal(ui.submit.disabled, false);
+  assert.equal(ui.requests.filter((request) => request.method === "POST").length, 1);
+});
+
+test("offline reload of a stopping reply never claims it has already stopped", async () => {
+  const saved = new Map([[PENDING_KEY, JSON.stringify(pending({ stopRequested: true }))], [DRAFT_KEY, "次の質問"]]);
+  const ui = await boot(async () => { throw new Error("Offline"); }, saved);
+  assert.equal(ui.elements["status-text"].textContent, "停止の状態を確認しています");
+  assert.deepEqual(ui.text(), ["こんにちは", "途中の返答"]);
+  assert.equal(ui.elements["message-input"].value, "次の質問");
+  await ui.advance(60_000);
+  assert.equal(ui.elements["status-action"].textContent, "もう一度確認");
+  assert.equal(ui.submit.disabled, true);
+});
+
+test("stopping before any output shows only the stop label, including after reload", async () => {
+  const ui = await boot(async () => Response.json({ messages: stoppedMessages(""), pending: null, observation: "current" }));
+  assert.deepEqual(ui.text(), ["こんにちは", "停止しました"]);
+  const reply = ui.elements.messages.children.find((node) => node.className === "message assistant");
+  assert.equal(reply.querySelector("p").hidden, true);
+  assert.equal(reply.querySelector("small").hidden, false);
+  assert.equal(ui.submit.disabled, false);
+  assert.equal(ui.elements["stop-generation"].hidden, true);
+});
+
+test("a stop that was not accepted leaves a clear message and a usable stop action", async () => {
+  const ui = await boot(async (url) => {
+    if (url === "/api/stop") return Response.json({ error: "Unavailable" }, { status: 503 });
+    return Response.json({ messages: [], pending: pending(), observation: "current" });
+  });
+  await ui.click("stop-generation");
+  assert.equal(ui.elements["status-text"].textContent, "停止を確認できませんでした。もう一度お試しください。");
+  assert.equal(ui.elements["stop-generation"].hidden, false);
+  assert.equal(ui.elements["stop-generation"].disabled, false);
+  assert.equal(ui.submit.disabled, true);
+});
+
+test("stop remains usable during a slow status read and ignores its late stale result", async () => {
+  let reads = 0, release;
+  const oldRead = new Promise((resolve) => { release = resolve; });
+  let state = { messages: [], pending: pending(), observation: "current" };
+  const ui = await boot(async (url, options) => {
+    if (options.method !== "POST" && ++reads === 2) return oldRead;
+    if (url === "/api/stop") state = { messages: stoppedMessages(), pending: null, observation: "current" };
+    return Response.json(state);
+  });
+  const polling = ui.advance(2000);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ui.elements["stop-generation"].disabled, false);
+  await ui.click("stop-generation");
+  release(Response.json({ messages: [], pending: pending(), observation: "current" }));
+  await polling;
+  assert.deepEqual(ui.text(), ["こんにちは", "途中の返答停止しました"]);
+  assert.equal(ui.submit.disabled, false);
+  assert.equal(ui.elements["stop-generation"].hidden, true);
   assert.equal(ui.timers.size, 0);
 });

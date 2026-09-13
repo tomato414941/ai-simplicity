@@ -72,6 +72,7 @@ function validateState(state) {
     (state.pendingAgentTurn !== null && (
       !state.pendingAgentTurn ||
       !["processing", "completed", "failed"].includes(state.pendingAgentTurn.status) ||
+      typeof state.pendingAgentTurn.stopRequested !== "boolean" ||
       (state.pendingAgentTurn.turnId !== null && typeof state.pendingAgentTurn.turnId !== "string") ||
       (state.pendingAgentTurn.error !== null && typeof state.pendingAgentTurn.error !== "string") ||
       ["id", "text", "partialText", "idempotencyKey", "createdAt"].some(
@@ -84,6 +85,7 @@ function validateState(state) {
         !message ||
         typeof message.id !== "string" ||
         !["user", "assistant"].includes(message.role) ||
+        (message.interruption !== undefined && (message.role !== "assistant" || !["user", "provider"].includes(message.interruption))) ||
         typeof message.text !== "string" ||
         typeof message.createdAt !== "string",
     )

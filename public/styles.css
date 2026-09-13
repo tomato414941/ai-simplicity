@@ -93,6 +93,15 @@ textarea {
   color: var(--ink-soft);
 }
 
+.message-ending {
+  display: block;
+  margin-top: 6px;
+  color: var(--ink-soft);
+  font-family: "Avenir Next", Avenir, "Hiragino Kaku Gothic ProN", sans-serif;
+  font-size: 0.8rem;
+  line-height: 1.7;
+}
+
 .thinking {
   display: inline-flex;
   gap: 5px;

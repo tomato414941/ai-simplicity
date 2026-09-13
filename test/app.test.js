@@ -99,7 +99,7 @@ test("HTTP success reports upstream observation failure separately from generati
   await store.update((state) => ({ ...state, agentSessionId: "sess_test", pendingAgentTurn: {
     id: "first", text: "こんにちは", createdAt: new Date().toISOString(),
     idempotencyKey: "attempt_1", turnId: "turn_test", partialText: "途中",
-    status: "processing", error: null,
+    status: "processing", error: null, stopRequested: false,
   } }));
   let unavailable = true;
   const sessions = {
@@ -123,4 +123,24 @@ test("HTTP success reports upstream observation failure separately from generati
   const recovered = await fetch(base + "/api/messages").then((value) => value.json());
   assert.equal(recovered.pending.status, "processing");
   assert.equal(recovered.observation, "current");
+});
+
+test("stop accepts a specific request ID without confusing acceptance with completion", async (t) => {
+  const stops = [];
+  const base = await listen(t, {
+    stop: async (id) => {
+      stops.push(id);
+      return { messages: [], pending: { id, status: "processing", stopRequested: true }, observation: "current" };
+    },
+  });
+  for (const body of [null, {}, { id: "wrong:id" }, { id: 1 }]) {
+    const response = await fetch(base + "/api/stop", { method: "POST", body: JSON.stringify(body) });
+    assert.equal(response.status, 400);
+  }
+  const response = await fetch(base + "/api/stop", { method: "POST", body: JSON.stringify({ id: "first" }) });
+  assert.equal(response.status, 202);
+  assert.deepEqual(stops, ["first"]);
+  const state = await response.json();
+  assert.equal(state.pending.status, "processing");
+  assert.equal(state.pending.stopRequested, true);
 });
