@@ -347,3 +347,20 @@ test("session failure and required action are not displayed as healthy reasoning
   const waiting = await boot(t, { remote: { session: session({ status: "requires_action" }), turns: [turn({ status: "waiting" })] } });
   assert.equal(waiting.status(), "返答が一時停止しています。");
 });
+
+test("a late cancellation error does not hide a subsequently confirmed completion", async (t) => {
+  const ui = await boot(t, { fetch: async ({ body }, { remote }) => {
+    if (body?.events[0].type === "agent.session.input.cancel") {
+      remote.turns.at(-1).status = "completed";
+      remote.session.status = "idle";
+      remote.items.push(item("完了しました", { status: "completed" }));
+      return new Response(null, { status: 503 });
+    }
+  } });
+  await ui.send("こんにちは");
+  await ui.clickComposer();
+  await ui.advance(1_000);
+  assert.deepEqual(ui.text(), ["こんにちは", "完了しました"]);
+  assert.equal(ui.elements["reply-status"].hidden, true);
+  assert.equal(ui.button.type, "submit");
+});

@@ -19,6 +19,7 @@ const state = new SessionState();
 const articles = new Map();
 let submission = readSaved(SUBMISSION_KEY);
 let stopping = readSaved(STOP_KEY);
+let stopErrorTurnId = null;
 let connection = null;
 let connected = false;
 let operation = null;
@@ -270,6 +271,7 @@ async function stop() {
   const turn = activeTurn();
   if (!turn) return;
   operation = "stop";
+  stopErrorTurnId = null;
   stopping = { session_id: state.session.id, turn_id: turn.id };
   writeSaved(STOP_KEY, stopping);
   notice = "";
@@ -283,7 +285,7 @@ async function stop() {
   } catch {
     stopping = null;
     writeSaved(STOP_KEY, null);
-    notice = "停止を確認できませんでした。もう一度お試しください。";
+    stopErrorTurnId = turn.id;
     recover(connection);
   } finally { operation = null; settleStop(); render(); }
 }
@@ -360,8 +362,9 @@ function renderItem(id, item) {
 
 function render() {
   const turn = state.latestTurn;
+  const stopError = stopErrorTurnId === turn?.id && !isTerminal(turn) ? "停止を確認できませんでした。もう一度お試しください。" : "";
   const generating = Boolean(activeTurn() || submission);
-  let label = notice, button = "";
+  let label = notice || stopError, button = "";
   action = "check";
   if (unavailableSince !== null) {
     label = stopping ? "停止の状態を確認しています" : generating ? "返答の状態を確認しています" : "会話を読み込んでいます";
@@ -378,7 +381,7 @@ function render() {
     label = "送信を確認できませんでした。入力はこの端末に保存されています。";
     button = "もう一度送信";
     action = "send";
-  } else if (generating) label = stopping ? "停止しています" : notice || (activeTurn()?.status === "waiting" || state.session?.status === "requires_action" ? "返答が一時停止しています。" : "返答を待っています");
+  } else if (generating) label = stopping ? "停止しています" : notice || stopError || (activeTurn()?.status === "waiting" || state.session?.status === "requires_action" ? "返答が一時停止しています。" : "返答を待っています");
   else if (turn?.status === "failed" && !notice) {
     label = turn.error?.code === "credit_balance_exhausted" ? "今は返答を作れません。" : "返答を作れませんでした。";
     if ([...state.items.values()].some((item) => item.role === "user" && item.turn_id === turn.id)) {
@@ -391,7 +394,7 @@ function render() {
   }
   statusElement.hidden = !label;
   statusText.textContent = label;
-  statusIndicator.hidden = Boolean(button || notice || !label);
+  statusIndicator.hidden = Boolean(button || notice || stopError || !label);
   statusAction.hidden = !button;
   statusAction.textContent = button;
   statusAction.disabled = Boolean(operation);
