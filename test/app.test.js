@@ -15,7 +15,7 @@ async function listen(t, conversation, logger = { error() {} }) {
 }
 
 test("serves the current interface and validates requests without an old API mode", async (t) => {
-  const base = await listen(t, { snapshot: async () => ({ messages: [], pending: null }) });
+  const base = await listen(t, { snapshot: async () => ({ messages: [], pending: null, observation: "current" }) });
   const html = await fetch(base).then((response) => response.text());
   const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   for (const [, id] of script.matchAll(/document.querySelector\("#([\w-]+)"\)/g)) assert.ok(html.includes(`id="${id}"`));
@@ -25,7 +25,7 @@ test("serves the current interface and validates requests without an old API mod
     const response = await fetch(base + "/api/messages", { method: "POST", body: JSON.stringify(body) });
     assert.equal(response.status, 400);
   }
-  assert.deepEqual(await fetch(base + "/api/messages").then((response) => response.json()), { messages: [], pending: null });
+  assert.deepEqual(await fetch(base + "/api/messages").then((response) => response.json()), { messages: [], pending: null, observation: "current" });
   assert.deepEqual(await fetch(base + "/api/health").then((response) => response.json()), { ok: true });
 });
 
@@ -91,4 +91,36 @@ test("retry is a separate explicit operation and server errors do not leak detai
   assert.equal(failure.status, 500);
   assert.doesNotMatch(await failure.text(), /Private diagnostic/);
   assert.equal(errors.length, 1);
+});
+
+test("HTTP success reports upstream observation failure separately from generation state", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "ai-simplicity-observation-"));
+  const store = new StateStore(join(directory, "state.json"));
+  await store.update((state) => ({ ...state, agentSessionId: "sess_test", pendingAgentTurn: {
+    id: "first", text: "こんにちは", createdAt: new Date().toISOString(),
+    idempotencyKey: "attempt_1", turnId: "turn_test", partialText: "途中",
+    status: "processing", error: null,
+  } }));
+  let unavailable = true;
+  const sessions = {
+    stream: () => assert.fail("Observation must not start another generation"),
+    turns: { retrieve: async () => {
+      if (unavailable) throw new Error("Private upstream error");
+      return { id: "turn_test", status: "in_progress" };
+    } },
+    items: { list: async function* () {} },
+  };
+  const conversation = new Conversation({ client: { beta: { agents: { sessions } } }, store, model: "test-model", logger: { error() {} } });
+  const base = await listen(t, conversation);
+  const response = await fetch(base + "/api/messages");
+  assert.equal(response.status, 200);
+  const snapshot = await response.json();
+  assert.equal(snapshot.pending.status, "processing");
+  assert.equal(snapshot.observation, "unavailable");
+  assert.equal(snapshot.pending.partialText, "途中");
+  assert.doesNotMatch(JSON.stringify(snapshot), /Private upstream error|sess_test|attempt_1|turn_test/);
+  unavailable = false;
+  const recovered = await fetch(base + "/api/messages").then((value) => value.json());
+  assert.equal(recovered.pending.status, "processing");
+  assert.equal(recovered.observation, "current");
 });

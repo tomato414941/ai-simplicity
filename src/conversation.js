@@ -19,6 +19,7 @@ export class Conversation {
   #store;
   #logger;
   #active = false;
+  #observation = "unavailable";
   #queue = Promise.resolve();
 
   constructor({ client, model, store, logger = console }) {
@@ -33,13 +34,13 @@ export class Conversation {
       const state = await this.#store.read();
       if (state.pendingAgentTurn && state.pendingAgentTurn.status !== "failed" && !this.#active) {
         try {
-          await this.#recover(state);
+          this.#observation = await this.#refresh(state) ? "current" : "unavailable";
         } catch (error) {
           this.#log(error);
-          await this.#updatePending({ status: "checking" });
+          this.#observation = "unavailable";
         }
       }
-      return publicState(await this.#store.read());
+      return publicState(await this.#store.read(), this.#observation);
     });
   }
 
@@ -49,22 +50,22 @@ export class Conversation {
       const previous = state.messages.find((message) => message.id === id);
       if (previous) {
         if (previous.role !== "user" || previous.text !== text) throw conflict();
-        return publicState(state);
+        return publicState(state, this.#observation);
       }
       if (state.pendingAgentTurn) {
         if (state.pendingAgentTurn.id !== id || state.pendingAgentTurn.text !== text) throw conflict();
-        return publicState(state);
+        return publicState(state, this.#observation);
       }
       const next = await this.#store.update((current) => ({
         ...current,
         pendingAgentTurn: {
           id, text, createdAt: new Date().toISOString(),
           idempotencyKey: randomUUID(), turnId: null,
-          partialText: "", status: "waiting", error: null,
+          partialText: "", status: "processing", error: null,
         },
       }));
       this.#start();
-      return publicState(next);
+      return publicState(next, this.#observation);
     });
   }
 
@@ -72,13 +73,13 @@ export class Conversation {
     return this.#serialize(async () => {
       const state = await this.#store.read();
       if (state.pendingAgentTurn?.id !== id) throw conflict();
-      if (state.pendingAgentTurn.status !== "failed" || this.#active) return publicState(state);
+      if (state.pendingAgentTurn.status !== "failed" || this.#active) return publicState(state, this.#observation);
       await this.#updatePending({
         idempotencyKey: randomUUID(), turnId: null, partialText: "",
-        status: "waiting", error: null,
+        status: "processing", error: null,
       });
       this.#start();
-      return publicState(await this.#store.read());
+      return publicState(await this.#store.read(), this.#observation);
     });
   }
 
@@ -90,7 +91,11 @@ export class Conversation {
 
   #start() {
     this.#active = true;
-    void this.#generate().catch((error) => this.#log(error)).finally(() => {
+    this.#observation = "current";
+    void this.#generate().catch((error) => {
+      this.#log(error);
+      this.#observation = "unavailable";
+    }).finally(() => {
       this.#active = false;
     });
   }
@@ -119,7 +124,7 @@ export class Conversation {
     const stream = this.#sessions.stream(state.agentSessionId, {
       input: state.pendingAgentTurn.text,
       idempotencyKey: state.pendingAgentTurn.idempotencyKey,
-    }, { ...READ_OPTIONS, signal: AbortSignal.timeout(45_000) });
+    }, READ_OPTIONS);
     const output = new Map();
     try {
       for await (const event of stream) {
@@ -144,7 +149,7 @@ export class Conversation {
             return;
           }
           if (event.type === "agent.session.turn.completed") {
-            await this.#finish(event.turn.id, outputText(output));
+            this.#observation = await this.#finish(event.turn.id, outputText(output)) ? "current" : "unavailable";
             return;
           }
         }
@@ -152,25 +157,28 @@ export class Conversation {
           throw new Error("Agent stream needs a status check.");
         }
       }
-      await this.#updatePending({ status: "checking" });
+      this.#observation = "unavailable";
     } catch (error) {
       this.#log(error);
-      await this.#updatePending({ status: "checking" });
+      this.#observation = "unavailable";
     } finally {
       // Stop local streaming only; the hosted turn may still be running.
       stream.controller.abort();
     }
   }
 
-  async #recover(state) {
+  async #refresh(state) {
     const options = { ...READ_OPTIONS, signal: AbortSignal.timeout(8_000) };
     const pending = state.pendingAgentTurn;
     if (!state.agentSessionId) {
       await this.#fail(null);
-      return;
+      return true;
     }
     let turn;
-    if (pending.turnId) {
+    if (pending.status === "completed") {
+      // A known outcome does not become unknown when fetching its text fails.
+      turn = { id: pending.turnId, status: "completed" };
+    } else if (pending.turnId) {
       turn = await this.#sessions.turns.retrieve(pending.turnId, { session_id: state.agentSessionId }, options);
     } else {
       for await (const candidate of this.#sessions.turns.list(state.agentSessionId, { order: "desc", limit: 100 }, options)) {
@@ -182,21 +190,30 @@ export class Conversation {
     }
     if (!turn) {
       // An empty list does not prove that input was never accepted.
-      await this.#updatePending({ status: "checking" });
-      return;
+      return false;
     }
     if (["failed", "cancelled"].includes(turn.status)) {
       await this.#fail(turn.id, turn.error?.code);
-      return;
+      return true;
     }
-    await this.#updatePending({ turnId: turn.id, status: "waiting" });
+    await this.#updatePending({ turnId: turn.id, status: turn.status === "completed" ? "completed" : "processing" });
+    // Waiting for external input is not normal autonomous progress.
+    if (!["queued", "in_progress", "completed"].includes(turn.status)) return false;
     const replies = [];
-    for await (const item of this.#sessions.items.list(state.agentSessionId, { order: "asc", limit: 100 }, options)) {
-      if (item.turn_id === turn.id && isAnswer(item)) replies.push(messageText(item));
+    try {
+      for await (const item of this.#sessions.items.list(state.agentSessionId, { order: "asc", limit: 100 }, options)) {
+        if (item.turn_id === turn.id && isAnswer(item)) replies.push(messageText(item));
+      }
+    } catch (error) {
+      if (turn.status === "completed") throw error;
+      // The turn is confirmed to be running even if partial text is unavailable.
+      this.#log(error);
+      return true;
     }
     const text = replies.join("\n\n").trim();
-    if (turn.status === "completed") await this.#finish(turn.id, text);
-    else if (text.length > pending.partialText.length) await this.#updatePending({ partialText: text });
+    if (turn.status === "completed") return this.#finish(turn.id, text);
+    if (text.length > pending.partialText.length) await this.#updatePending({ partialText: text });
+    return true;
   }
 
   #updatePending(fields) {
@@ -221,8 +238,11 @@ export class Conversation {
 
   async #finish(turnId, text) {
     // Completion and item publication may be observed at different times.
-    if (!text) return this.#updatePending({ turnId, status: "checking" });
-    return this.#store.update((state) => {
+    if (!text) {
+      await this.#updatePending({ turnId, status: "completed" });
+      return false;
+    }
+    await this.#store.update((state) => {
       const pending = state.pendingAgentTurn;
       return {
         ...state, agentLastTurnId: turnId, pendingAgentTurn: null,
@@ -232,6 +252,7 @@ export class Conversation {
         ],
       };
     });
+    return true;
   }
 
   #log(error) {
@@ -243,9 +264,10 @@ export class Conversation {
   }
 }
 
-function publicState({ messages, pendingAgentTurn: pending }) {
+function publicState({ messages, pendingAgentTurn: pending }, observation) {
   return {
     messages,
+    observation: !pending || pending.status === "failed" ? "current" : observation,
     pending: pending ? {
       id: pending.id, text: pending.text, createdAt: pending.createdAt,
       partialText: pending.partialText, status: pending.status, error: pending.error,

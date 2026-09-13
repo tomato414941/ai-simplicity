@@ -71,7 +71,7 @@ function validateState(state) {
     (state.agentLastTurnId !== null && typeof state.agentLastTurnId !== "string") ||
     (state.pendingAgentTurn !== null && (
       !state.pendingAgentTurn ||
-      !["waiting", "checking", "failed"].includes(state.pendingAgentTurn.status) ||
+      !["processing", "completed", "failed"].includes(state.pendingAgentTurn.status) ||
       (state.pendingAgentTurn.turnId !== null && typeof state.pendingAgentTurn.turnId !== "string") ||
       (state.pendingAgentTurn.error !== null && typeof state.pendingAgentTurn.error !== "string") ||
       ["id", "text", "partialText", "idempotencyKey", "createdAt"].some(

@@ -55,7 +55,8 @@ test("accepts durable input before generation and keeps one session", async () =
   const { conversation, calls, settled, store } = await setup();
   const accepted = await conversation.send({ id: "first", text: "Hello" });
   assert.equal(accepted.pending.text, "Hello");
-  assert.equal(accepted.pending.status, "waiting");
+  assert.equal(accepted.pending.status, "processing");
+  assert.equal(accepted.observation, "current");
   assert.equal(accepted.pending.idempotencyKey, undefined);
   assert.equal(accepted.pending.turnId, undefined);
   await settled();
@@ -66,7 +67,7 @@ test("accepts durable input before generation and keeps one session", async () =
   assert.deepEqual(streams.map((call) => call.input), ["Hello", "Again"]);
   assert.notEqual(streams[0].idempotencyKey, streams[1].idempotencyKey);
   assert.equal(streams[0].options.maxRetries, 0);
-  assert.ok(streams[0].options.signal instanceof AbortSignal);
+  assert.equal(streams[0].options.signal, undefined, "Streaming must not have a generation deadline");
   assert.equal((await store.read()).messages.length, 4);
   assert.deepEqual(calls[0].create.agent.multi_agent, { enabled: false });
 });
@@ -95,7 +96,8 @@ for (const ending of ["idle", "environment.failed", "requires_action", "eof"]) {
     await settled();
     const snapshot = await conversation.snapshot();
     assert.equal(snapshot.pending.partialText, "Partial");
-    assert.equal(snapshot.pending.status, "checking");
+    assert.equal(snapshot.pending.status, "processing");
+    assert.equal(snapshot.observation, "unavailable");
     assert.deepEqual(snapshot.messages, []);
     await conversation.send({ id: "first", text: "Hello" });
     await conversation.retry("first");
@@ -134,11 +136,91 @@ test("uses the recorded turn ID and retains partial text while remote work runs"
   };
   sessions.turns.list = () => assert.fail("A known turn must not be guessed from a list");
   sessions.items.list = async function* () { yield answer("Part"); };
-  assert.equal((await conversation.snapshot()).pending.partialText, "Partial");
+  const running = await conversation.snapshot();
+  assert.equal(running.pending.partialText, "Partial");
+  assert.equal(running.pending.status, "processing");
+  assert.equal(running.observation, "current");
   sessions.turns.retrieve = async () => { throw new Error("Offline"); };
   const snapshot = await conversation.snapshot();
-  assert.equal(snapshot.pending.status, "checking");
+  assert.equal(snapshot.pending.status, "processing");
+  assert.equal(snapshot.observation, "unavailable");
   assert.equal(snapshot.pending.partialText, "Partial");
+  assert.equal(calls.filter((call) => call.stream).length, 1);
+});
+
+test("an open stream with no text stays processing and has no elapsed-time cutoff", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const events = (async function* () {
+    yield terminal("created");
+    await gate;
+    yield itemDone("A considered answer");
+    yield terminal();
+  })();
+  const { conversation, calls, store, controllers, settled } = await setup(events);
+  await conversation.send({ id: "first", text: "Think carefully" });
+  await until(async () => (await store.read()).pendingAgentTurn?.turnId === "turn_1");
+  // The model can keep reasoning without emitting text; there is no turn-duration signal.
+  assert.equal(calls.find((call) => call.stream).options.signal, undefined);
+  const snapshot = await conversation.snapshot();
+  assert.equal(snapshot.pending.status, "processing");
+  assert.equal(snapshot.pending.partialText, "");
+  assert.equal(snapshot.observation, "current");
+  assert.equal(controllers[0].signal.aborted, false);
+  release();
+  await settled();
+  assert.equal((await conversation.snapshot()).messages[1].text, "A considered answer");
+});
+
+test("observation failure does not mutate the stored generation state", async () => {
+  const { conversation, sessions, store, settled, calls } = await setup([terminal("created"), itemDone("Partial")]);
+  await conversation.send({ id: "first", text: "Hello" });
+  await settled();
+  const before = await store.read();
+  sessions.turns.retrieve = async () => { throw new Error("Upstream unavailable"); };
+  for (let i = 0; i < 3; i++) {
+    const snapshot = await conversation.snapshot();
+    assert.equal(snapshot.observation, "unavailable");
+    assert.equal(snapshot.pending.status, "processing");
+  }
+  assert.deepEqual(await store.read(), before);
+  await conversation.retry("first");
+  assert.equal(calls.filter((call) => call.stream).length, 1);
+  sessions.turns.retrieve = async () => ({ id: "turn_1", status: "in_progress" });
+  sessions.items.list = async function* () { throw new Error("Partial text unavailable"); };
+  const running = await conversation.snapshot();
+  assert.equal(running.observation, "current", "A successfully observed running turn clears the outage");
+  assert.equal(running.pending.partialText, "Partial");
+});
+
+test("completed work stays completed while its result is unavailable", async () => {
+  const { conversation, sessions, settled, calls } = await setup([terminal()]);
+  await conversation.send({ id: "first", text: "Hello" });
+  await settled();
+  sessions.turns.retrieve = () => assert.fail("A confirmed completion need not be re-established");
+  sessions.items.list = async function* () { throw new Error("Result unavailable"); };
+  const snapshot = await conversation.snapshot();
+  assert.equal(snapshot.pending.status, "completed");
+  assert.equal(snapshot.observation, "unavailable");
+  await conversation.retry("first");
+  assert.equal(calls.filter((call) => call.stream).length, 1);
+  sessions.items.list = async function* () { yield answer("Published result"); };
+  const complete = await conversation.snapshot();
+  assert.equal(complete.pending, null);
+  assert.equal(complete.observation, "current");
+  assert.equal(complete.messages[1].text, "Published result");
+});
+
+test("a turn waiting for external input is not mistaken for normal generation", async () => {
+  const { conversation, sessions, settled, calls } = await setup([terminal("created")]);
+  await conversation.send({ id: "first", text: "Hello" });
+  await settled();
+  sessions.turns.retrieve = async () => ({ id: "turn_1", status: "waiting" });
+  const snapshot = await conversation.snapshot();
+  assert.equal(snapshot.pending.status, "processing");
+  assert.equal(snapshot.observation, "unavailable");
+  await conversation.retry("first");
   assert.equal(calls.filter((call) => call.stream).length, 1);
 });
 
@@ -185,7 +267,7 @@ test("does not guess success from the previous completed turn", async () => {
   await conversation.send({ id: "first", text: "Hello" });
   await settled();
   sessions.turns.list = async function* () { yield { id: "old_turn", status: "completed", subagent_id: null }; };
-  assert.equal((await conversation.snapshot()).pending.status, "checking");
+  assert.equal((await conversation.snapshot()).observation, "unavailable");
 });
 
 test("rejects competing inputs and mismatched request IDs", async () => {
@@ -208,6 +290,9 @@ test("marks pre-input session failures as retryable and rejects legacy state", a
   assert.equal((await conversation.snapshot()).pending.text, "Hello");
   await assert.rejects(store.update(() => ({ conversationId: "legacy", messages: [] })), /invalid shape/);
   await assert.rejects(store.update((state) => ({ ...state, agentSessionId: 123 })), /invalid shape/);
+  await assert.rejects(store.update((state) => ({
+    ...state, pendingAgentTurn: { ...state.pendingAgentTurn, status: "checking" },
+  })), /invalid shape/);
 });
 
 test("completion without published text stays checkable instead of enabling duplicate work", async () => {
@@ -215,7 +300,9 @@ test("completion without published text stays checkable instead of enabling dupl
   await conversation.send({ id: "first", text: "Hello" });
   await settled();
   sessions.turns.retrieve = async () => ({ id: "turn_1", status: "completed" });
-  assert.equal((await conversation.snapshot()).pending.status, "checking");
+  const snapshot = await conversation.snapshot();
+  assert.equal(snapshot.pending.status, "completed");
+  assert.equal(snapshot.observation, "unavailable");
   await conversation.retry("first");
   assert.equal(calls.filter((call) => call.stream).length, 1);
   sessions.items.list = async function* () { yield answer("Published later"); };
@@ -247,7 +334,7 @@ test("official SDK server-error streams recover from completed turns with no sec
   const store = new StateStore(join(directory, "state.json"));
   const conversation = new Conversation({ client, model: "test-model", store, logger: { error: (error) => errors.push(error) } });
   await conversation.send({ id: "first", text: "Hello" });
-  await until(async () => (await store.read()).pendingAgentTurn?.status === "checking");
+  await until(() => errors.length > 0);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal((await conversation.snapshot()).messages[1].text, "Recovered");
   assert.equal(calls.filter((call) => call.path.endsWith("/events") && call.method === "POST").length, 1);
