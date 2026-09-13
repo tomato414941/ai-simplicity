@@ -33,6 +33,20 @@ npm start
 
 API キーはブラウザへ渡さず、サーバーだけが保持します。ローカルの状態ファイルは Git の対象外です。
 
+## 公開に向けた構成（未導入）
+
+現状はまだ認証のない一人用プロトタイプです。複数利用者向けの移行先として、次の構成を選定しています。クラウド環境の作成・移行は未実施です。
+
+- **[Render Web Service](https://render.com/docs/web-services)**: Web 画面と Node.js API を一つのサービスで配信します。生成の受信処理をリクエスト終了後も継続するため、アイドル時に停止しない有料インスタンスを使います。
+- **[Supabase Auth](https://supabase.com/docs/guides/auth/auth-anonymous)**: 初回利用時に匿名認証し、後から同じユーザー ID に確認済みメールアドレスを追加します。既存アカウントとの統合は別の操作とし、メールアドレスの一致だけでは統合しません。
+- **[Supabase Postgres](https://supabase.com/docs/guides/database/overview)**: 会話と利用権をユーザー ID に紐づけて保存します。Render の一時ファイル領域に履歴は保存しません。
+
+開始時は API 一つと DB 一つで構成し、別のフロントエンドホスティング、ジョブ基盤、キャッシュサーバーは追加しません。iPhone・Android・Web で共通のユーザーを扱い、ストア決済の確認と利用権の付与は別途実装します。
+
+公開前に、全会話操作の認証・利用者ごとのアクセス制御、DB 保存、匿名利用の濫用対策を実装します。既存の一人用履歴は最初の訪問者へ自動で割り当てません。一般利用者へのメール認証には、[外部 SMTP と送信元の設定](https://supabase.com/docs/guides/auth/auth-smtp)も必要です。
+
+2026-09-13 時点の最小構成は、[Render の有料 Web Service](https://render.com/pricing)が月 7 米ドル、[Supabase Pro](https://supabase.com/pricing)が月 25 米ドル（Micro プロジェクト一つ込み）で、基本料金は合計月 32 米ドルからです。Render は Hobby ワークスペースを想定しています。AI 利用料、メール配信、ドメイン、従量超過分、税は含みません。開発段階でこの有料構成を契約する必要はありません。
+
 ## エージェント
 
 [OpenAI Agents API](https://developers.openai.com/api/docs/guides/agents-api/quickstart) と公式 JavaScript SDK を使います。エージェントの実行ループ、ツール実行、会話コンテキストの管理は OpenAI 側に任せています。
