@@ -90,6 +90,38 @@ test("upstream failures are HTTP errors, not successful snapshots or fake turn f
   assert.doesNotMatch(JSON.stringify([body, logs]), /Private chat|key details|test-key/);
 });
 
+test("HTTP clients and the SDK receive native error classification and retry metadata", async (t) => {
+  const { base } = await app(t, async () => Response.json({ error: {
+    type: "rate_limit_error", code: "rate_limit_exceeded", param: "events", message: "Private diagnostic",
+  } }, { status: 429, headers: {
+    "retry-after": "7", "retry-after-ms": "7000", "x-request-id": "req_rate_limit", "x-should-retry": "false",
+    "set-cookie": "upstream-secret=private", "x-private-header": "private",
+  } }));
+  const response = await post(base, [messageEvent()], "input_limited");
+  assert.equal(response.status, 429);
+  const body = await response.json();
+  assert.equal(body.error.type, "rate_limit_error");
+  assert.equal(body.error.code, "rate_limit_exceeded");
+  assert.equal(body.error.param, "events");
+  assert.equal(response.headers.get("retry-after"), "7");
+  assert.equal(response.headers.get("retry-after-ms"), "7000");
+  assert.equal(response.headers.get("x-request-id"), "req_rate_limit");
+  assert.equal(response.headers.get("x-should-retry"), "false");
+  assert.equal(response.headers.get("set-cookie"), null);
+  assert.equal(response.headers.get("x-private-header"), null);
+  assert.doesNotMatch(JSON.stringify(body), /Private diagnostic/);
+
+  const client = new OpenAI({ apiKey: "local-test", baseURL: base + "/v1", maxRetries: 0 });
+  await assert.rejects(client.beta.agents.sessions.events.create("sess_test", { events: [messageEvent()] }), (error) => {
+    assert.ok(error instanceof OpenAI.RateLimitError);
+    assert.equal(error.type, "rate_limit_error");
+    assert.equal(error.param, "events");
+    assert.equal(error.headers.get("retry-after"), "7");
+    assert.equal(error.requestID, "req_rate_limit");
+    return true;
+  });
+});
+
 test("unsupported endpoints, parameters and inputs are rejected, not silently translated", async (t) => {
   const { base, requests } = await app(t, () => assert.fail("Invalid requests must not reach OpenAI"));
   for (const path of ["/api/messages", "/api/retry", "/api/stop", "/v1/responses", "/v1/agents/sessions/sess_unowned", prefix + "/events/another"]) {

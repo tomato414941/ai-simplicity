@@ -92,14 +92,18 @@ export function createServer({ session, logger = console }) {
       const status = error.status ?? 502;
       if (status >= 500) logger.error({
         event: "api_request_error", type: error.name, status,
-        code: error.code ?? null, requestId: error.request_id ?? null,
+        code: error.code ?? null, requestId: error.requestID ?? null,
       });
       // A transport failure is not a made-up terminal turn event.
       if (response.headersSent) return response.destroy();
+      for (const name of ["retry-after", "retry-after-ms", "x-should-retry", "x-request-id"]) {
+        const value = error.headers?.get(name);
+        if (value !== null && value !== undefined) response.setHeader(name, value);
+      }
       sendJson(response, status, { error: {
         message: error.local ? error.message : "The request could not be completed.",
-        type: error.local ? "invalid_request_error" : (status >= 500 ? "server_error" : "invalid_request_error"),
-        param: error.local ? error.param ?? null : null,
+        type: error.type ?? (status >= 500 ? "server_error" : "invalid_request_error"),
+        param: error.param ?? null,
         code: error.code ?? null,
       } });
     }
