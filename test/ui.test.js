@@ -3,11 +3,11 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { SessionState, isTerminal, itemText, readEvents } from "../public/agent-session.js";
-import { session, turn, item, userItem, page, turnEvent } from "./helpers.js";
+import { session, turn, item, userItem, page, turnEvent, USER_A, USER_B } from "./helpers.js";
 
-const script = (await readFile(new URL("../public/app.js", import.meta.url), "utf8")).replace(/^import .*\n/, "");
-const SUBMISSION_KEY = "ai-simplicity.input-event";
-const DRAFT_KEY = "ai-simplicity.draft";
+const script = (await readFile(new URL("../public/app.js", import.meta.url), "utf8")).replace(/^import .*\n/gm, "");
+const SUBMISSION_KEY = `ai-simplicity.${USER_A}.input-event`;
+const DRAFT_KEY = `ai-simplicity.${USER_A}.draft`;
 
 // Executes the shipped UI using a small DOM and deterministic clock. No browser automation.
 class Element {
@@ -23,7 +23,7 @@ class Element {
   setAttribute(name, value) { this.attributes[name] = value; }
   getAttribute(name) { return this.attributes[name]; }
   addEventListener(type, callback) { this.handlers[type] = callback; }
-  focus() {}
+  focus() { this.focused = true; }
   requestSubmit() { this.handlers.submit({ preventDefault() {} }); }
   set textContent(value) { this.text = value; }
   get textContent() { return this.text ?? this.children.map((node) => node.textContent).join(""); }
@@ -37,6 +37,15 @@ async function boot(t, options = {}) {
   svg.append(new Element("path")); button.append(svg); elements.composer.append(button); elements.messages.append(elements["reply-status"]);
   const timers = new Map(), requests = [], streams = [], windowEvents = {}, accepted = new Set();
   let time = 100_000, timerId = 0, eventId = 0, uuid = 0, writes = 0;
+  let authChanged, accountOptions;
+  let authSession = options.authSession ?? { user: { id: USER_A, is_anonymous: true }, access_token: "user-a-token" };
+  const auth = {
+    getSession: async () => ({ data: { session: authSession } }),
+    getUser: async () => ({ data: { user: authSession.user } }),
+    onAuthStateChange: (callback) => { authChanged = callback; },
+    signInAnonymously: async () => ({ data: { session: authSession } }),
+    ...options.auth,
+  };
   class Clock extends Date {
     constructor(...args) { super(...(args.length ? args : [time])); }
     static now() { return time; }
@@ -44,9 +53,11 @@ async function boot(t, options = {}) {
   const emit = (event) => { for (const stream of streams) if (!stream.closed) stream.output.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ event_id: `evt_${++eventId}`, ...event })}\n\n`)); };
   const flush = async () => { for (let i = 0; i < 8; i++) await new Promise((resolve) => setImmediate(resolve)); };
   const context = {
-    SessionState, isTerminal, itemText, readEvents, URLSearchParams,
+    SessionState, isTerminal, itemText, readEvents, URLSearchParams, queueMicrotask,
+    openAuth: async () => ({ auth, sessionDefaults: { agent: { model: "gpt-6-astra" }, environment: { type: "openai_hosted" } } }),
+    mountAccount: (value) => { accountOptions = value; return { render() {} }; },
     document: { querySelector: (selector) => elements[selector.slice(1)], createElement: (tag) => new Element(tag), documentElement: { scrollHeight: 1000 } },
-    window: { innerHeight: 1000, scrollY: 0, scrollTo() {}, addEventListener: (name, callback) => { windowEvents[name] = callback; } },
+    window: { innerHeight: 1000, scrollY: 0, scrollTo() {}, matchMedia: () => ({ matches: options.mobile ?? false }), addEventListener: (name, callback) => { windowEvents[name] = callback; } },
     localStorage: { getItem: (key) => saved.get(key) ?? null, setItem: (key, value) => { if (options.storageFails) throw new Error("Unavailable storage"); saved.set(key, value); writes++; }, removeItem: (key) => saved.delete(key) },
     crypto: { randomUUID: () => `input_${++uuid}` }, Date: Clock, AbortSignal, AbortController,
     requestAnimationFrame: (callback) => callback(),
@@ -60,6 +71,10 @@ async function boot(t, options = {}) {
       const override = await options.fetch?.(request, { remote, emit, streams });
       if (override) return override;
       if (request.method === "POST") {
+        if (url.pathname === "/v1/agents/sessions") {
+          remote.session = session();
+          return Response.json(remote.session);
+        }
         if (request.body.events[0].type === "agent.session.input.message") {
           const key = request.headers.get("idempotency-key");
           if (!accepted.has(key)) {
@@ -97,14 +112,15 @@ async function boot(t, options = {}) {
         const end = start + Number(url.searchParams.get("limit") ?? 20);
         return Response.json(page(all.slice(start, end), end < all.length));
       }
-      return Response.json(url.pathname.endsWith("/sessions") ? page([remote.session]) : remote.session);
+      return Response.json(url.pathname.endsWith("/sessions") ? page(remote.session ? [remote.session] : []) : remote.session);
     },
   };
   await runInNewContext(`(async () => { ${script}\n})()`, context);
   await flush();
   t.after(() => windowEvents.pagehide());
   return {
-    elements, button, saved, requests, streams, remote, timers, emit,
+    elements, button, saved, requests, streams, remote, timers, emit, accountOptions,
+    async authenticate(next, event = "SIGNED_IN") { authSession = next; authChanged(event, next); await flush(); },
     hide: () => windowEvents.pagehide(),
     get writes() { return writes; },
     text: () => elements.messages.children.filter((node) => node.tag === "article").map((node) => node.textContent),
@@ -486,4 +502,121 @@ test("a late cancellation error does not hide a subsequently confirmed completio
   assert.deepEqual(ui.text(), ["こんにちは", "完了しました"]);
   assert.equal(ui.elements["reply-status"].hidden, true);
   assert.equal(ui.button.type, "submit");
+});
+
+test("first visit is authenticated but creates an OpenAI session only on the first send", async (t) => {
+  const ui = await boot(t, { remote: { session: null } });
+  assert.equal(ui.requests.length, 1);
+  assert.equal(ui.requests[0].headers.get("authorization"), "Bearer user-a-token");
+  assert.equal(ui.button.disabled, false);
+  await ui.send("はじめまして");
+  const posts = ui.requests.filter((r) => r.method === "POST");
+  assert.equal(posts.length, 2);
+  assert.equal(posts[0].path, "/v1/agents/sessions");
+  assert.deepEqual(posts[0].body, { agent: { model: "gpt-6-astra" }, environment: { type: "openai_hosted" } });
+  assert.ok(ui.requests.findIndex((r) => r.path.endsWith("/events") && r.method === "GET") < ui.requests.findIndex((r) => r.body?.events));
+  assert.ok(ui.requests.every((r) => r.headers.get("authorization") === "Bearer user-a-token"));
+  assert.deepEqual(ui.text(), ["はじめまして"]);
+});
+
+test("unscoped legacy data and another user's drafts or pending sends never enter a new user's view", async (t) => {
+  const saved = new Map([
+    ["ai-simplicity.session-items", JSON.stringify({ session: session(), items: [userItem("private old conversation")], turns: [] })],
+    ["ai-simplicity.draft", "private legacy draft"],
+    [DRAFT_KEY, "private user A draft"],
+    [SUBMISSION_KEY, JSON.stringify({ session_id: "sess_test", idempotency_key: "private_key", events: [{ type: "agent.session.input.cancel" }] })],
+  ]);
+  const ui = await boot(t, { saved, authSession: { user: { id: USER_B, is_anonymous: true }, access_token: "user-b-token" }, remote: { session: null } });
+  assert.deepEqual(ui.text(), []);
+  assert.equal(ui.elements["message-input"].value, "");
+  assert.equal(ui.button.disabled, false);
+  assert.equal(ui.requests.filter((r) => r.method === "POST").length, 0);
+  assert.equal(saved.get(DRAFT_KEY), "private user A draft");
+});
+
+test("account changes clear visible history and ignore an old user's delayed send acknowledgment", async (t) => {
+  let acknowledge;
+  const ui = await boot(t, { remote: { items: [userItem("Aだけの会話")] }, fetch: async ({ method }) => {
+    if (method === "POST") return new Promise((resolve) => { acknowledge = resolve; });
+  } });
+  await ui.send("Aの未確認入力");
+  ui.remote.session = null; ui.remote.items = []; ui.remote.turns = [];
+  await ui.authenticate({ user: { id: USER_B, is_anonymous: true }, access_token: "user-b-token" });
+  assert.deepEqual(ui.text(), []);
+  assert.equal(ui.elements["message-input"].value, "");
+  assert.ok(ui.streams.every((stream) => stream.closed));
+  acknowledge(new Response(null, { status: 204 }));
+  await ui.advance(0);
+  assert.deepEqual(ui.text(), []);
+  assert.equal(ui.button.disabled, false);
+  assert.equal(ui.saved.has(SUBMISSION_KEY), true, "A's unresolved input never becomes B's submission");
+});
+
+test("email conversion keeps the same conversation; token refresh reconnects reads without resending", async (t) => {
+  const ui = await boot(t, { remote: { items: [userItem("同じ会話")], turns: [turn()] } });
+  await ui.authenticate({ user: { id: USER_A, is_anonymous: false, email: "person@example.com" }, access_token: "refreshed-token" }, "TOKEN_REFRESHED");
+  assert.deepEqual(ui.text(), ["同じ会話"]);
+  assert.equal(ui.requests.filter((r) => r.method === "POST").length, 0);
+  assert.equal(ui.requests.at(-1).headers.get("authorization"), "Bearer refreshed-token");
+  assert.equal(ui.streams.length, 2);
+  assert.equal(ui.streams[0].closed, true);
+});
+
+test("failed identity verification never reads API history or displays saved drafts", async (t) => {
+  const ui = await boot(t, { saved: new Map([[DRAFT_KEY, "private"]]), auth: { getUser: async () => ({ error: new Error("Unavailable") }) } });
+  assert.equal(ui.requests.length, 0);
+  assert.deepEqual(ui.text(), []);
+  assert.equal(ui.elements["message-input"].value, "");
+  assert.equal(ui.button.disabled, true);
+  assert.equal(ui.elements["status-action"].textContent, "もう一度接続");
+});
+
+test("on phones Enter inserts a newline and opening the page does not summon the keyboard", async (t) => {
+  const ui = await boot(t, { mobile: true });
+  const input = ui.elements["message-input"];
+  assert.notEqual(input.focused, true);
+  input.value = "スマホの下書き";
+  input.handlers.keydown({ key: "Enter", shiftKey: false, isComposing: false, preventDefault() { assert.fail("Do not intercept Enter on touch devices"); } });
+  await ui.advance(0);
+  assert.equal(ui.requests.filter((r) => r.method === "POST").length, 0);
+  await ui.clickComposer();
+  assert.deepEqual(ui.text(), ["スマホの下書き"]);
+});
+
+test("a lost creation response only triggers reads, preserving the draft and avoiding a second environment", async (t) => {
+  const ui = await boot(t, { remote: { session: null }, fetch: async ({ path, method }, { remote }) => {
+    if (path === "/v1/agents/sessions" && method === "POST") {
+      remote.session = session();
+      throw new Error("Acknowledgment lost");
+    }
+  } });
+  await ui.send("最初の入力");
+  assert.equal(ui.elements["message-input"].value, "最初の入力");
+  assert.equal(ui.requests.filter((r) => r.method === "POST").length, 1);
+  assert.deepEqual(ui.text(), []);
+  await ui.send("最初の入力");
+  assert.equal(ui.requests.filter((r) => r.method === "POST" && r.path === "/v1/agents/sessions").length, 1);
+  assert.deepEqual(ui.text(), ["最初の入力"]);
+});
+
+test("a new device without working storage cannot allocate an environment or lose its first input", async (t) => {
+  const ui = await boot(t, { storageFails: true, remote: { session: null } });
+  await ui.send("残しておく");
+  assert.equal(ui.requests.filter((r) => r.method === "POST").length, 0);
+  assert.equal(ui.elements["message-input"].value, "残しておく");
+});
+
+test("an old account's delayed creation result cannot overwrite the new account's session", async (t) => {
+  let complete;
+  const ui = await boot(t, { remote: { session: null }, fetch: async ({ path, method }) => {
+    if (path === "/v1/agents/sessions" && method === "POST") return new Promise((resolve) => { complete = resolve; });
+  } });
+  await ui.send("Aの最初の入力");
+  await ui.authenticate({ user: { id: USER_B, is_anonymous: true }, access_token: "user-b-token" });
+  const count = ui.requests.length;
+  complete(Response.json(session({ id: "sess_a" })));
+  await ui.advance(0);
+  assert.equal(ui.requests.length, count);
+  assert.deepEqual(ui.text(), []);
+  assert.equal(ui.elements["message-input"].value, "");
 });

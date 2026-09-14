@@ -28,6 +28,7 @@ body {
 }
 
 button,
+input,
 textarea {
   font: inherit;
 }
@@ -54,9 +55,56 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 28px;
-  min-height: 100dvh;
-  padding: 48px 0 150px;
+  min-height: calc(100dvh - 60px);
+  padding: 32px 0 150px;
 }
+
+.account-bar {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: max(8px, env(safe-area-inset-top));
+}
+
+.account-bar button,
+.text-button,
+.account-close {
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.account-bar button { font-size: 0.8rem; }
+.account-bar button:hover,
+.text-button:hover { color: var(--ink); }
+
+.account-dialog {
+  position: fixed;
+  width: min(calc(100% - 32px), 420px);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  padding: 40px 28px 24px;
+  border: 1px solid #3a3d36;
+  border-radius: 24px;
+  background: #1c1e1b;
+  color: var(--ink);
+  box-shadow: 0 24px 90px #0009;
+}
+
+.account-dialog::backdrop { background: #0009; backdrop-filter: blur(5px); }
+.account-dialog h1 { margin: 0 24px 16px 0; font-size: 1.25rem; font-weight: 500; }
+.account-dialog p { white-space: pre-line; overflow-wrap: anywhere; font-size: 0.9rem; line-height: 1.8; color: var(--ink-soft); }
+.account-close { position: absolute; top: 8px; right: 8px; min-width: 44px; font-size: 1.6rem; }
+.account-dialog form { display: grid; gap: 12px; margin-top: 24px; }
+.account-dialog label { font-size: 0.8rem; }
+.account-dialog input { min-width: 0; width: 100%; padding: 12px; font-size: 16px; border: 1px solid #555b50; border-radius: 10px; background: var(--paper); color: var(--ink); }
+.account-dialog form button { min-height: 48px; border: 0; border-radius: 12px; background: var(--action); color: #171815; cursor: pointer; }
+.account-dialog button:disabled { opacity: 0.5; cursor: wait; }
+.account-dialog .text-button { padding-left: 0; text-align: left; font-size: 0.85rem; }
+button:focus-visible,
+.account-dialog input:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 
 .message {
   width: fit-content;

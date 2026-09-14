@@ -1,6 +1,13 @@
 import OpenAI from "openai";
 import { createServer } from "../src/server.js";
-import { AgentSession } from "../src/agent-session.js";
+import { UserSessions } from "../src/user-sessions.js";
+import { unauthorized } from "../src/auth.js";
+
+export const USER_A = "11111111-1111-4111-8111-111111111111";
+export const USER_B = "22222222-2222-4222-8222-222222222222";
+export function authFetch(url, options = {}) {
+  return fetch(url, { ...options, headers: { Authorization: "Bearer local-test", ...options.headers } });
+}
 
 export const session = (fields = {}) => ({
   id: "sess_test", object: "agent.session", status: "idle", created_at: 1, last_active_at: 1,
@@ -28,7 +35,7 @@ export const turnEvent = (fields = {}) => {
   return { type: `agent.session.turn.${value.status === "queued" ? "created" : value.status}`, event_id: `evt_${value.id}_${value.status}`, session_id: value.session_id, turn_id: value.id, turn: value };
 };
 
-export async function app(t, handler) {
+export async function app(t, handler, options = {}) {
   const requests = [], logs = [];
   const client = new OpenAI({
     apiKey: "test-key", maxRetries: 0,
@@ -39,10 +46,25 @@ export async function app(t, handler) {
       return handler(request);
     },
   });
-  const agentSession = new AgentSession({ client, model: "gpt-6-astra", store: { read: async () => "sess_test", write() { throw new Error("No runtime writes expected."); } } });
-  await agentSession.initialize();
-  const server = createServer({ session: agentSession, logger: { error: (value) => logs.push(value) } });
+  const ownership = options.ownership ?? new Map([[USER_A, "sess_test"]]);
+  const sessions = new UserSessions({ client, model: "gpt-6-astra", store: {
+    read: async (userId) => ownership.get(userId) ?? null,
+    write: async (userId, sessionId) => {
+      assertUnique(userId, sessionId);
+      ownership.set(userId, sessionId);
+    },
+  } });
+  function assertUnique(userId, sessionId) {
+    if (ownership.has(userId) || [...ownership.values()].includes(sessionId)) throw Object.assign(new Error("Duplicate ownership"), { status: 409 });
+  }
+  const authenticate = options.authenticate ?? (async (request) => {
+    const id = new Map([["Bearer local-test", USER_A], ["Bearer user-b", USER_B]]).get(request.headers.authorization);
+    if (!id) throw unauthorized();
+    return { id, expiresAt: Date.now() + 60_000 };
+  });
+  const publicConfig = { supabase: { url: "https://example.supabase.co", publishableKey: "sb_publishable_test" }, session: sessions.defaults };
+  const server = createServer({ sessions, authenticate, publicConfig, logger: { error: (value) => logs.push(value) } });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
-  return { base: `http://127.0.0.1:${server.address().port}`, requests, logs, server };
+  return { base: `http://127.0.0.1:${server.address().port}`, requests, logs, server, ownership };
 }

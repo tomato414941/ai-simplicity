@@ -8,12 +8,15 @@ const PUBLIC_ASSETS = new Map([
   ["/", ["index.html", "text/html"]],
   ["/index.html", ["index.html", "text/html"]],
   ["/app.js", ["app.js", "text/javascript"]],
-  ["/agent-session.js", ["agent-session.js", "text/javascript"]],
   ["/styles.css", ["styles.css", "text/css"]],
 ]);
 
-export function createServer({ session, logger = console }) {
+export function createServer({ sessions, authenticate, publicConfig, logger = console }) {
+  if (!sessions || typeof authenticate !== "function") throw new Error("Authentication and user-scoped sessions are required.");
   return createHttpServer(async (request, response) => {
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("Referrer-Policy", "no-referrer");
+    response.setHeader("X-Frame-Options", "DENY");
     const controller = new AbortController();
     response.once("close", () => controller.abort());
     const options = { signal: controller.signal };
@@ -21,17 +24,26 @@ export function createServer({ session, logger = console }) {
       const url = new URL(request.url, "http://localhost");
       const method = request.method;
       if (method === "GET" && url.pathname === "/api/health") return sendJson(response, 200, { ok: true });
+      if (method === "GET" && url.pathname === "/api/config") return sendJson(response, 200, publicConfig);
+
+      const user = (url.pathname === PREFIX || url.pathname.startsWith(PREFIX + "/")) ? await authenticate(request) : null;
+      if (user && method === "POST" && request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) {
+        throw Object.assign(invalid("Origin is not allowed."), { status: 403 });
+      }
 
       if (method === "GET" && url.pathname === PREFIX) {
         const query = listQuery(url, ["agent_id"]);
-        if (query.after && query.after !== session.id) throw invalid("Unknown cursor.", "after");
-        return sendJson(response, 200, await session.list(query, options));
+        return sendJson(response, 200, await sessions.list(user.id, query, options));
+      }
+      if (method === "POST" && url.pathname === PREFIX) {
+        noQuery(url);
+        return sendJson(response, 200, await sessions.create(user.id, await readJson(request)));
       }
 
       const match = url.pathname.match(/^\/v1\/agents\/sessions\/([\w-]+)(?:\/(items|turns|events)(?:\/([\w-]+))?)?$/);
       if (match) {
         const [, sessionId, resource, resourceId] = match;
-        if (sessionId !== session.id) throw notFound();
+        const session = await sessions.owned(user.id, sessionId, options);
         if (method === "GET" && !resource) {
           noQuery(url);
           return sendJson(response, 200, await session.retrieve(options));
@@ -46,6 +58,11 @@ export function createServer({ session, logger = console }) {
         if (resource === "events" && !resourceId) {
           noQuery(url);
           if (method === "GET") {
+            // A subscription cannot outlive the credential that opened it.
+            // Closing it never stops the agent; the refreshed client reconnects.
+            const expiry = setTimeout(() => { controller.abort(); response.destroy(); }, Math.max(1, Math.min(user.expiresAt - Date.now(), 2_147_483_647)));
+            expiry.unref();
+            response.once("close", () => clearTimeout(expiry));
             const upstream = await session.stream(options);
             if (!upstream.headers.get("content-type")?.startsWith("text/event-stream") || !upstream.body) {
               throw Object.assign(new Error("Expected an event stream."), { status: 502 });
@@ -64,9 +81,6 @@ export function createServer({ session, logger = console }) {
             return response.end();
           }
           if (method === "POST") {
-            if (request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) {
-              throw Object.assign(invalid("Origin is not allowed."), { status: 403 });
-            }
             const body = await readJson(request);
             validateEvents(body);
             const key = request.headers["idempotency-key"];
@@ -82,7 +96,7 @@ export function createServer({ session, logger = console }) {
 
       const asset = method === "GET" && PUBLIC_ASSETS.get(url.pathname);
       if (asset) {
-        const content = await readFile(new URL(`../public/${asset[0]}`, import.meta.url));
+        const content = await readFile(new URL(asset[0] === "app.js" ? "../.build/app.js" : `../public/${asset[0]}`, import.meta.url));
         response.writeHead(200, { "content-type": `${asset[1]}; charset=utf-8`, "cache-control": "no-cache" });
         return response.end(content);
       }
@@ -90,6 +104,7 @@ export function createServer({ session, logger = console }) {
     } catch (error) {
       if (controller.signal.aborted) return;
       const status = error.status ?? 502;
+      if (status === 401 && !response.headersSent) response.setHeader("WWW-Authenticate", "Bearer");
       if (status >= 500) logger.error({
         event: "api_request_error", type: error.name, status,
         code: error.code ?? null, requestId: error.requestID ?? null,

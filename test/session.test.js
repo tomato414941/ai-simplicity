@@ -1,17 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
-import { SessionStore } from "../src/session-store.js";
-import { AgentSession } from "../src/agent-session.js";
+import { UserSessions } from "../src/user-sessions.js";
 import { SessionState, readEvents, itemText } from "../public/agent-session.js";
 import { session, turn, item, userItem, turnEvent } from "./helpers.js";
 
-test("startup persists only the native session ID and restart does not recreate it", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "ai-simplicity-session-"));
-  const path = join(directory, "session.json");
-  const store = new SessionStore(path);
+test("listing and restarting never allocate an OpenAI environment; creation persists ownership", async () => {
+  const saved = new Map();
+  const store = { read: async (id) => saved.get(id), write: async (id, sessionId) => saved.set(id, sessionId) };
   let creates = 0;
   const client = { beta: { agents: { sessions: { create: async (body) => {
     creates++;
@@ -19,12 +14,15 @@ test("startup persists only the native session ID and restart does not recreate 
     assert.equal(body.input, undefined);
     assert.deepEqual(body.agent.multi_agent, { enabled: false });
     return session();
-  } } } } };
-  await new AgentSession({ client, model: "gpt-6-astra", store }).initialize();
-  await new AgentSession({ client, model: "gpt-6-astra", store: new SessionStore(path) }).initialize();
+  }, retrieve: async () => session() } } } };
+  const sessions = new UserSessions({ client, model: "gpt-6-astra", store });
+  assert.deepEqual((await sessions.list("user", {})).data, []);
+  assert.equal(creates, 0);
+  await sessions.create("user", sessions.defaults);
+  const restarted = new UserSessions({ client, model: "gpt-6-astra", store });
+  assert.deepEqual((await restarted.list("user", {})).data, [session()]);
   assert.equal(creates, 1);
-  assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { session_id: "sess_test" });
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.equal(saved.get("user"), "sess_test");
 });
 
 test("native items keep IDs, types, phases and content parts; done replaces rather than appends", () => {

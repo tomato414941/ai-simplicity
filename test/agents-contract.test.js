@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import OpenAI from "openai";
-import { app, session, turn, item, page, messageEvent, turnEvent } from "./helpers.js";
+import { app, session, turn, item, page, messageEvent, turnEvent, authFetch as fetch } from "./helpers.js";
 
 // The clients use only the public HTTP contract, not the Web application's state helpers.
 // Only OpenAI's transport is simulated; requests pass through the real application server.

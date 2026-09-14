@@ -1,4 +1,6 @@
 import { SessionState, isTerminal, itemText, readEvents } from "./agent-session.js";
+import { openAuth } from "./auth.js";
+import { mountAccount } from "./account.js";
 
 const messagesElement = document.querySelector("#messages");
 const form = document.querySelector("#composer");
@@ -9,14 +11,14 @@ const statusElement = document.querySelector("#reply-status");
 const statusText = document.querySelector("#status-text");
 const statusIndicator = document.querySelector("#status-indicator");
 const statusAction = document.querySelector("#status-action");
-const DRAFT_KEY = "ai-simplicity.draft";
-const SUBMISSION_KEY = "ai-simplicity.input-event";
-const VIEW_KEY = "ai-simplicity.session-items";
+let draftKey, submissionKey;
 const RECOVERY_WINDOW_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 10_000;
-const state = new SessionState();
+let state = new SessionState();
 const articles = new Map();
-let submission = readSaved(SUBMISSION_KEY);
+let submission = null;
+let auth, account, sessionDefaults, identity;
+let initializing = false, authIssue = "";
 let stopping = null;
 let stopErrorTurnId = null;
 let connection = null;
@@ -28,12 +30,6 @@ let recoveryTimer;
 let notice = "";
 let action = "check";
 
-const cached = readSaved(VIEW_KEY);
-if (cached?.session && Array.isArray(cached.items) && Array.isArray(cached.turns)) {
-  state.restore(cached.session, cached.items, cached.turns);
-}
-if (!submission?.events?.length || typeof submission.idempotency_key !== "string") submission = null;
-try { input.value = localStorage.getItem(DRAFT_KEY) ?? ""; } catch {}
 resizeInput();
 renderHistory();
 render();
@@ -49,7 +45,8 @@ composerButton.addEventListener("click", () => {
 });
 statusAction.addEventListener("click", () => {
   if (operation) return;
-  if (action === "send") void submit();
+  if (!identity) void start();
+  else if (action === "send") void submit();
   else if (action === "retry") {
     const item = [...state.items.values()].find((item) => item.role === "user" && item.turn_id === state.latestTurn?.id);
     if (item) sendMessage(itemText(item));
@@ -61,13 +58,12 @@ statusAction.addEventListener("click", () => {
 });
 input.addEventListener("input", () => { resizeInput(); saveDraft(); });
 input.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !window.matchMedia("(pointer: coarse)").matches) {
     event.preventDefault();
     if (!activeTurn() && !submission) form.requestSubmit();
   }
 });
 window.addEventListener("pagehide", () => {
-  saveView();
   const previous = connection;
   connection = null;
   previous?.controller.abort();
@@ -77,8 +73,76 @@ window.addEventListener("pageshow", (event) => { if (event.persisted) void conne
 window.addEventListener("online", () => { if (!connected) { unavailableSince = null; void connect(); } });
 window.addEventListener("offline", () => recover(connection));
 
-await connect();
-input.focus();
+await start();
+if (!window.matchMedia("(pointer: coarse)").matches) input.focus();
+
+async function start() {
+  if (initializing) return;
+  initializing = true; authIssue = ""; render();
+  try {
+    if (!auth) {
+      ({ auth, sessionDefaults } = await openAuth());
+      account = mountAccount({ auth, getUser: () => identity?.user,
+        hasConversation: () => Boolean(state.session || submission || input.value.trim()),
+        signOut: async () => {
+          const result = await auth.signOut({ scope: "local" });
+          if (result.error) throw result.error;
+          await start();
+        },
+      });
+      auth.onAuthStateChange((event, session) => {
+        // Keep SDK callbacks synchronous; reconnect outside its auth lock.
+        if (!initializing && event !== "INITIAL_SESSION") queueMicrotask(() => { void identify(session); });
+      });
+    }
+    const result = await auth.getSession();
+    if (result.error) throw result.error;
+    let session = result.data.session;
+    if (session) {
+      const verified = await auth.getUser();
+      if (verified.error) throw verified.error;
+      session = { ...session, user: verified.data.user };
+    } else {
+      const created = await auth.signInAnonymously();
+      if (created.error) throw created.error;
+      session = created.data.session;
+    }
+    if (!session) throw new Error("No authenticated session.");
+    await identify(session);
+  } catch {
+    authIssue = "今は接続できません。少し待ってからお試しください。";
+  } finally { initializing = false; render(); }
+}
+
+async function identify(session) {
+  if (session && session.user.id === identity?.id) {
+    const refreshed = identity.token !== session.access_token;
+    identity.token = session.access_token;
+    identity.user = session.user;
+    account.render();
+    if (refreshed) await connect();
+    return;
+  }
+  identity?.controller.abort();
+  connection?.controller.abort();
+  connection = null; connected = false;
+  clearTimeout(recoveryTimer);
+  state = new SessionState();
+  submission = null; stopping = null; stopErrorTurnId = null; operation = null;
+  unavailableSince = null; recoveryAttempt = 0; notice = "";
+  identity = session ? { id: session.user.id, user: session.user, token: session.access_token, controller: new AbortController() } : null;
+  draftKey = identity ? `ai-simplicity.${identity.id}.draft` : null;
+  submissionKey = identity ? `ai-simplicity.${identity.id}.input-event` : null;
+  input.value = "";
+  if (identity) {
+    submission = readSaved(submissionKey);
+    if (!submission?.events?.length || typeof submission.idempotency_key !== "string") submission = null;
+    try { input.value = localStorage.getItem(draftKey) ?? ""; } catch {}
+  }
+  authIssue = identity ? "" : "ログインし直してください。";
+  resizeInput(); renderHistory(); render(); account.render();
+  if (identity) await connect();
+}
 
 function activeTurn() {
   const turn = state.latestTurn;
@@ -90,11 +154,14 @@ function recoveryRemaining() {
 }
 
 async function jsonRequest(url, options = {}, signal) {
+  const owner = identity;
+  if (!owner) throw new Error("Authentication required.");
   const response = await fetch(url, {
     ...options,
-    headers: { "content-type": "application/json", "OpenAI-Beta": "agents=v1", ...options.headers },
-    signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(signal ? Math.max(1, Math.min(REQUEST_TIMEOUT_MS, recoveryRemaining())) : REQUEST_TIMEOUT_MS)]),
+    headers: { "content-type": "application/json", "OpenAI-Beta": "agents=v1", ...options.headers, Authorization: `Bearer ${owner.token}` },
+    signal: AbortSignal.any([owner.controller.signal, ...(signal ? [signal] : []), AbortSignal.timeout(signal ? Math.max(1, Math.min(REQUEST_TIMEOUT_MS, recoveryRemaining())) : REQUEST_TIMEOUT_MS)]),
   });
+  if (owner !== identity) throw new Error("Account changed.");
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     const error = body?.error;
@@ -102,7 +169,9 @@ async function jsonRequest(url, options = {}, signal) {
       status: response.status, type: error?.type, code: error?.code, param: error?.param,
     });
   }
-  return response.status === 204 ? null : response.json();
+  const body = response.status === 204 ? null : await response.json();
+  if (owner !== identity) throw new Error("Account changed.");
+  return body;
 }
 
 async function allPages(path, signal) {
@@ -119,6 +188,7 @@ async function allPages(path, signal) {
 }
 
 async function connect() {
+  if (!identity) return;
   clearTimeout(recoveryTimer);
   const previous = connection;
   const current = { controller: new AbortController(), ready: false, buffer: [], syncing: null };
@@ -129,15 +199,19 @@ async function connect() {
   try {
     if (!state.session) {
       const page = await jsonRequest("/v1/agents/sessions?limit=1", {}, current.controller.signal);
-      if (!page.data[0]) throw new Error("No session is available.");
-      state.session = page.data[0];
+      if (connection !== current) return;
+      state.session = page.data[0] ?? null;
+      if (!state.session) {
+        connected = true; unavailableSince = null; recoveryAttempt = 0;
+        render(); return;
+      }
     }
     // Only opening the HTTP connection has a deadline. The SSE body has none.
     const opening = setTimeout(() => current.controller.abort(), Math.min(REQUEST_TIMEOUT_MS, recoveryRemaining()));
     let response;
     try {
       response = await fetch(`${base()}/events`, {
-        headers: { Accept: "text/event-stream", "OpenAI-Beta": "agents=v1" }, signal: current.controller.signal,
+        headers: { Accept: "text/event-stream", "OpenAI-Beta": "agents=v1", Authorization: `Bearer ${identity.token}` }, signal: current.controller.signal,
       });
     } finally { clearTimeout(opening); }
     if (!response.ok || !response.headers.get("content-type")?.startsWith("text/event-stream")) {
@@ -182,7 +256,6 @@ async function synchronize(current) {
     settleStop();
     renderHistory();
     render();
-    saveView();
   })();
   try { await current.syncing; }
   finally { current.syncing = null; }
@@ -207,7 +280,6 @@ function recover(current) {
   current?.controller.abort();
   connected = false;
   unavailableSince ??= Date.now();
-  saveView();
   clearTimeout(recoveryTimer);
   const remaining = recoveryRemaining();
   if (remaining > 0) {
@@ -220,12 +292,34 @@ function recover(current) {
   render();
 }
 
-function sendMessage(text) {
+async function sendMessage(text) {
+  const owner = identity;
+  if (!state.session) {
+    try { localStorage.setItem(draftKey, input.value); }
+    catch { notice = "この端末に入力を保存できないため、送信していません。"; render(); return; }
+    operation = "create"; notice = ""; saveDraft(); render();
+    try {
+      const created = await jsonRequest("/v1/agents/sessions", { method: "POST", body: JSON.stringify(sessionDefaults) });
+      if (owner !== identity) return;
+      state.session = created;
+      await connect();
+      if (owner !== identity) return;
+      if (!connected) throw new Error("Conversation is not ready.");
+    } catch {
+      if (owner !== identity) return;
+      notice = "今は送信できません。入力は残してあります。";
+      // Only read after an uncertain creation (including a second device's
+      // concurrent creation). Never create or send again automatically.
+      void connect();
+      return;
+    } finally { if (owner === identity) { operation = null; render(); } }
+  }
+  if (owner !== identity) return;
   const next = {
     session_id: state.session.id, idempotency_key: crypto.randomUUID(), acknowledged: false,
     events: [{ type: "agent.session.input.message", input: [{ role: "user", content: [{ type: "input_text", text }] }] }],
   };
-  try { localStorage.setItem(SUBMISSION_KEY, JSON.stringify(next)); }
+  try { localStorage.setItem(submissionKey, JSON.stringify(next)); }
   catch { notice = "この端末に入力を保存できないため、送信していません。"; render(); return; }
   submission = next;
   input.value = "";
@@ -236,7 +330,8 @@ function sendMessage(text) {
 }
 
 async function submit() {
-  if (!submission || submission.session_id !== state.session.id) return;
+  if (!submission || submission.session_id !== state.session?.id) return;
+  const owner = identity;
   operation = "send";
   notice = "";
   render();
@@ -244,12 +339,14 @@ async function submit() {
     await jsonRequest(`${base()}/events`, {
       method: "POST", headers: { "Idempotency-Key": submission.idempotency_key }, body: JSON.stringify({ events: submission.events }),
     });
+    if (owner !== identity) return;
     submission.acknowledged = true;
     settleSubmission();
     // Acceptance is independent of item delivery and whether input starts or steers a turn.
     const current = connection;
     if (current) await synchronize(current).catch(() => recover(current));
   } catch (error) {
+    if (owner !== identity) return;
     if ([400, 401, 403, 404, 413, 415, 422, 429].includes(error.status)) {
       input.value = [itemText(submission.events[0].input[0]), input.value].filter(Boolean).join("\n\n");
       submission = null;
@@ -263,13 +360,12 @@ async function submit() {
       recover(connection);
     }
   } finally {
-    operation = null;
-    renderHistory();
-    render();
+    if (owner === identity) { operation = null; renderHistory(); render(); }
   }
 }
 
 async function stop() {
+  const owner = identity;
   const turn = activeTurn();
   if (!turn) return;
   operation = "stop";
@@ -281,13 +377,15 @@ async function stop() {
     await jsonRequest(`${base()}/events`, {
       method: "POST", body: JSON.stringify({ events: [{ type: "agent.session.input.cancel" }] }),
     });
+    if (owner !== identity) return;
     // 204 confirms acceptance, not cancellation. Only a turn event/read does that.
     if (!connected) { unavailableSince = null; recoveryAttempt = 0; void connect(); }
   } catch {
+    if (owner !== identity) return;
     stopping = null;
     stopErrorTurnId = turn.id;
     recover(connection);
-  } finally { operation = null; settleStop(); render(); }
+  } finally { if (owner === identity) { operation = null; settleStop(); render(); } }
 }
 
 function settleSubmission() {
@@ -348,7 +446,8 @@ function render() {
   const generating = Boolean(activeTurn());
   let label = notice || stopError, button = "";
   action = "check";
-  if (unavailableSince !== null) {
+  if (authIssue) { label = authIssue; button = "もう一度接続"; }
+  else if (unavailableSince !== null) {
     label = stopping ? "停止の状態を確認しています" : submission ? "送信の状態を確認しています" : generating ? "返答の状態を確認しています" : "会話を読み込んでいます";
     if (recoveryRemaining() === 0) {
       label = stopping ? "今は停止を確認できません。" : submission ? "今は送信を確認できません。入力は保存されています。" : generating ? "今は返答を確認できません。" : "今は会話を読み込めません。";
@@ -359,7 +458,7 @@ function render() {
     label = "今は会話を続けられません。";
     button = "もう一度確認";
   }
-  else if (operation === "send") label = "送信しています";
+  else if (operation === "send" || operation === "create") label = "送信しています";
   else if (submission && !submission.acknowledged && !operation) {
     label = "送信を確認できませんでした。入力はこの端末に保存されています。";
     button = "もう一度送信";
@@ -380,7 +479,7 @@ function render() {
   statusIndicator.hidden = Boolean(button || notice || stopError || !label);
   statusAction.hidden = !button;
   statusAction.textContent = button;
-  statusAction.disabled = Boolean(operation);
+  statusAction.disabled = Boolean(operation || initializing);
   const buttonLabel = generating ? (stopping ? "停止中" : "停止") : operation === "send" ? "送信中" : "送る";
   composerButton.type = generating ? "button" : "submit";
   composerButton.setAttribute("aria-label", buttonLabel);
@@ -388,13 +487,12 @@ function render() {
   composerIcon.setAttribute("d", generating ? "M8 8h8v8H8z" : "M5 12h13m-5-5 5 5-5 5");
   composerIcon.setAttribute("fill", generating ? "currentColor" : "none");
   composerButton.disabled = Boolean(operation) || (generating ? Boolean(stopping) : Boolean(submission) || !connected || state.session?.status === "failed");
+  input.disabled = !identity || operation === "create";
+  account?.render();
 }
 
 function readSaved(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
 function writeSaved(key, value) { try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, JSON.stringify(value)); } catch {} }
-function saveSubmission() { writeSaved(SUBMISSION_KEY, submission); }
-function saveView() {
-  if (state.session) writeSaved(VIEW_KEY, { session: state.session, items: [...state.items.values()], turns: [...state.turns.values()] });
-}
-function saveDraft() { try { localStorage.setItem(DRAFT_KEY, input.value); } catch {} }
+function saveSubmission() { if (submissionKey) writeSaved(submissionKey, submission); }
+function saveDraft() { try { if (draftKey) localStorage.setItem(draftKey, input.value); } catch {} }
 function resizeInput() { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 180)}px`; }

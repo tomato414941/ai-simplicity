@@ -1,12 +1,14 @@
 import OpenAI from "openai";
-import { resolve } from "node:path";
-import { AgentSession } from "./agent-session.js";
+import { createClient } from "@supabase/supabase-js";
+import { createAuthenticator } from "./auth.js";
+import { UserSessions, SupabaseSessionStore } from "./user-sessions.js";
 import { createServer } from "./server.js";
-import { SessionStore } from "./session-store.js";
 
-if (!process.env.OPENAI_API_KEY) {
-  console.error("OPENAI_API_KEY is required.");
-  process.exit(1);
+for (const key of ["OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_SECRET_KEY"]) {
+  if (!process.env[key]) {
+    console.error(`${key} is required.`);
+    process.exit(1);
+  }
 }
 
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
@@ -15,14 +17,26 @@ if (!Number.isInteger(port) || port < 0 || port > 65_535) {
   process.exit(1);
 }
 
-const store = new SessionStore(resolve(process.env.STATE_PATH ?? "data/state.json"));
-const session = new AgentSession({
+const url = new URL(process.env.SUPABASE_URL).origin;
+const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY;
+if (!publishableKey.startsWith("sb_publishable_")) throw new Error("Use a Supabase publishable key, not a secret key.");
+const supabaseOptions = {
+  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  global: { fetch: (url, options = {}) => fetch(url, {
+    ...options, signal: AbortSignal.any([AbortSignal.timeout(8_000), ...(options.signal ? [options.signal] : [])]),
+  }) },
+};
+const verifier = createClient(url, publishableKey, supabaseOptions);
+const database = createClient(url, process.env.SUPABASE_SECRET_KEY, supabaseOptions);
+const sessions = new UserSessions({
   client: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
   model: process.env.OPENAI_MODEL ?? "gpt-6-astra",
-  store,
+  store: new SupabaseSessionStore(database),
 });
-await session.initialize();
-const server = createServer({ session });
+const server = createServer({
+  sessions, authenticate: createAuthenticator({ auth: verifier.auth, url }),
+  publicConfig: { supabase: { url, publishableKey }, session: sessions.defaults },
+});
 
 server.listen(port, () => {
   const address = server.address();

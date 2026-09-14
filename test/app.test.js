@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import OpenAI from "openai";
-import { app, session, turn, item, userItem, page, messageEvent } from "./helpers.js";
+import { app, session, turn, item, userItem, page, messageEvent, authFetch as fetch } from "./helpers.js";
 
 const prefix = "/v1/agents/sessions/sess_test";
 const post = (base, events, key, extra = {}) => fetch(base + prefix + "/events", {
@@ -150,13 +150,13 @@ test("cross-origin writes and non-JSON requests are rejected", async (t) => {
 test("serves only explicit public files and keeps the single send/stop button", async (t) => {
   const { base } = await app(t, () => assert.fail("Static requests do not call OpenAI"));
   const html = await fetch(base).then((r) => r.text());
-  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8") + await readFile(new URL("../public/account.js", import.meta.url), "utf8");
   for (const [, id] of script.matchAll(/document.querySelector\("#([\w-]+)"\)/g)) assert.ok(html.includes(`id="${id}"`));
   assert.equal([...html.split('<form id="composer"')[1].split("</form>")[0].matchAll(/<button\b/g)].length, 1);
-  for (const path of ["/", "/index.html", "/app.js", "/agent-session.js", "/styles.css"]) {
+  for (const path of ["/", "/index.html", "/app.js", "/styles.css"]) {
     const response = await fetch(base + path); assert.equal(response.status, 200); await response.body.cancel();
   }
-  for (const path of ["/package.json", "/../package.json", "/%2e%2e/package.json", "/..%2fpackage.json", "/src/server.js", "/constructor", "/__proto__", "/file:/etc/passwd", "/file:%2fetc%2fpasswd"]) {
+  for (const path of ["/account.js", "/auth.js", "/agent-session.js", "/package.json", "/../package.json", "/%2e%2e/package.json", "/..%2fpackage.json", "/src/server.js", "/constructor", "/__proto__", "/file:/etc/passwd", "/file:%2fetc%2fpasswd"]) {
     assert.equal((await fetch(base + path)).status, 404, path);
   }
   assert.deepEqual(await fetch(base + "/api/health").then((r) => r.json()), { ok: true });
