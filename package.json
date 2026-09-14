@@ -5,14 +5,22 @@
   "type": "module",
   "description": "A single, continuous surface for talking with AI.",
   "scripts": {
+    "build": "esbuild public/app.js --bundle --format=esm --target=es2022 --minify --outfile=.build/app.js",
+    "predev": "npm run build",
     "dev": "node --watch src/index.js",
+    "prestart": "npm run build",
     "start": "node src/index.js",
+    "pretest": "npm run build",
     "test": "node --test"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.116.0",
     "openai": "^7.15.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }
