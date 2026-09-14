@@ -12,13 +12,12 @@ const statusAction = document.querySelector("#status-action");
 const DRAFT_KEY = "ai-simplicity.draft";
 const SUBMISSION_KEY = "ai-simplicity.input-event";
 const VIEW_KEY = "ai-simplicity.session-items";
-const STOP_KEY = "ai-simplicity.cancel-turn";
 const RECOVERY_WINDOW_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 const state = new SessionState();
 const articles = new Map();
 let submission = readSaved(SUBMISSION_KEY);
-let stopping = readSaved(STOP_KEY);
+let stopping = null;
 let stopErrorTurnId = null;
 let connection = null;
 let connected = false;
@@ -96,7 +95,13 @@ async function jsonRequest(url, options = {}, signal) {
     headers: { "content-type": "application/json", "OpenAI-Beta": "agents=v1", ...options.headers },
     signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(signal ? Math.max(1, Math.min(REQUEST_TIMEOUT_MS, recoveryRemaining())) : REQUEST_TIMEOUT_MS)]),
   });
-  if (!response.ok) throw Object.assign(new Error("Request failed."), { status: response.status });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    const error = body?.error;
+    throw Object.assign(new Error("Request failed."), {
+      status: response.status, type: error?.type, code: error?.code, param: error?.param,
+    });
+  }
   return response.status === 204 ? null : response.json();
 }
 
@@ -187,10 +192,6 @@ function handleEvent(event, current, restoring = false) {
   state.apply(event);
   if (event.type === "error") throw new Error("The event stream needs recovery.");
   if (event.type === "agent.session.environment.failed") notice = "今は返答を続けられません。";
-  if (event.turn?.subagent_id == null && event.turn && submission && isNewTurn(event.turn.id) && !submission.turn_id) {
-    submission.turn_id = event.turn.id;
-    saveSubmission();
-  }
   settleStop();
   if (event.item || (event.turn && isTerminal(event.turn))) renderHistory();
   else if (event.item_id) renderItem(event.item_id, state.items.get(event.item_id));
@@ -222,7 +223,6 @@ function recover(current) {
 function sendMessage(text) {
   const next = {
     session_id: state.session.id, idempotency_key: crypto.randomUUID(), acknowledged: false,
-    previous_turn_id: state.latestTurn?.id ?? null, turn_id: null,
     events: [{ type: "agent.session.input.message", input: [{ role: "user", content: [{ type: "input_text", text }] }] }],
   };
   try { localStorage.setItem(SUBMISSION_KEY, JSON.stringify(next)); }
@@ -245,8 +245,10 @@ async function submit() {
       method: "POST", headers: { "Idempotency-Key": submission.idempotency_key }, body: JSON.stringify({ events: submission.events }),
     });
     submission.acknowledged = true;
-    saveSubmission();
     settleSubmission();
+    // Acceptance is independent of item delivery and whether input starts or steers a turn.
+    const current = connection;
+    if (current) await synchronize(current).catch(() => recover(current));
   } catch (error) {
     if ([400, 401, 403, 404, 413, 415, 422, 429].includes(error.status)) {
       input.value = [itemText(submission.events[0].input[0]), input.value].filter(Boolean).join("\n\n");
@@ -273,7 +275,6 @@ async function stop() {
   operation = "stop";
   stopErrorTurnId = null;
   stopping = { session_id: state.session.id, turn_id: turn.id };
-  writeSaved(STOP_KEY, stopping);
   notice = "";
   render();
   try {
@@ -284,7 +285,6 @@ async function stop() {
     if (!connected) { unavailableSince = null; recoveryAttempt = 0; void connect(); }
   } catch {
     stopping = null;
-    writeSaved(STOP_KEY, null);
     stopErrorTurnId = turn.id;
     recover(connection);
   } finally { operation = null; settleStop(); render(); }
@@ -292,35 +292,17 @@ async function stop() {
 
 function settleSubmission() {
   if (!submission?.acknowledged) return;
-  if ([...state.items.values()].some(matchesSubmission)) {
-    submission = null;
-    saveSubmission();
-  }
-}
-function matchesSubmission(item) {
-  return submission && item.type === "message" && item.role === "user"
-    && isNewTurn(item.turn_id)
-    && (!submission.turn_id || item.turn_id === submission.turn_id)
-    && itemText(item) === itemText(submission.events[0].input[0]);
-}
-function isNewTurn(id) {
-  const ids = [...state.turns.keys()];
-  return ids.indexOf(id) > ids.indexOf(submission.previous_turn_id);
+  submission = null;
+  saveSubmission();
 }
 function settleStop() {
   if (stopping && (isTerminal(state.turns.get(stopping.turn_id)) || stopping.session_id !== state.session?.id)) {
     stopping = null;
-    writeSaved(STOP_KEY, null);
   }
 }
 
 function renderHistory() {
   const visible = [...state.items].filter(([, item]) => item.type === "message" && item.phase !== "commentary");
-  if (submission && !visible.some(([, item]) => matchesSubmission(item))) {
-    const entry = ["input-event", submission.events[0].input[0]];
-    const index = visible.findIndex(([, item]) => item.turn_id === submission.turn_id);
-    visible.splice(index < 0 ? visible.length : index, 0, entry);
-  }
   for (const turn of state.turns.values()) {
     if (!["cancelled", "failed"].includes(turn.status) || turn.subagent_id != null) continue;
     const index = visible.findLastIndex(([, item]) => item.turn_id === turn.id);
@@ -363,13 +345,13 @@ function renderItem(id, item) {
 function render() {
   const turn = state.latestTurn;
   const stopError = stopErrorTurnId === turn?.id && !isTerminal(turn) ? "停止を確認できませんでした。もう一度お試しください。" : "";
-  const generating = Boolean(activeTurn() || submission);
+  const generating = Boolean(activeTurn());
   let label = notice || stopError, button = "";
   action = "check";
   if (unavailableSince !== null) {
-    label = stopping ? "停止の状態を確認しています" : generating ? "返答の状態を確認しています" : "会話を読み込んでいます";
+    label = stopping ? "停止の状態を確認しています" : submission ? "送信の状態を確認しています" : generating ? "返答の状態を確認しています" : "会話を読み込んでいます";
     if (recoveryRemaining() === 0) {
-      label = stopping ? "今は停止を確認できません。" : generating ? "今は返答を確認できません。入力は保存されています。" : "今は会話を読み込めません。";
+      label = stopping ? "今は停止を確認できません。" : submission ? "今は送信を確認できません。入力は保存されています。" : generating ? "今は返答を確認できません。" : "今は会話を読み込めません。";
       button = "もう一度確認";
     }
   } else if (!connected) label = "会話を読み込んでいます";
@@ -377,6 +359,7 @@ function render() {
     label = "今は会話を続けられません。";
     button = "もう一度確認";
   }
+  else if (operation === "send") label = "送信しています";
   else if (submission && !submission.acknowledged && !operation) {
     label = "送信を確認できませんでした。入力はこの端末に保存されています。";
     button = "もう一度送信";
@@ -398,13 +381,13 @@ function render() {
   statusAction.hidden = !button;
   statusAction.textContent = button;
   statusAction.disabled = Boolean(operation);
-  const buttonLabel = generating ? (stopping ? "停止中" : "停止") : "送る";
+  const buttonLabel = generating ? (stopping ? "停止中" : "停止") : operation === "send" ? "送信中" : "送る";
   composerButton.type = generating ? "button" : "submit";
   composerButton.setAttribute("aria-label", buttonLabel);
   composerButton.setAttribute("title", buttonLabel);
   composerIcon.setAttribute("d", generating ? "M8 8h8v8H8z" : "M5 12h13m-5-5 5 5-5 5");
   composerIcon.setAttribute("fill", generating ? "currentColor" : "none");
-  composerButton.disabled = Boolean(operation) || (generating ? !activeTurn() || Boolean(stopping) : !connected || state.session?.status === "failed");
+  composerButton.disabled = Boolean(operation) || (generating ? Boolean(stopping) : Boolean(submission) || !connected || state.session?.status === "failed");
 }
 
 function readSaved(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }

@@ -64,13 +64,16 @@ async function boot(t, options = {}) {
           const key = request.headers.get("idempotency-key");
           if (!accepted.has(key)) {
             accepted.add(key);
-            const next = turn({ id: `turn_${remote.turns.length + 1}`, created_at: remote.turns.length + 1 });
-            remote.turns.push(next);
+            let next = remote.turns.findLast((value) => !isTerminal(value));
+            if (!next) {
+              next = turn({ id: `turn_${remote.turns.length + 1}`, created_at: remote.turns.length + 1 });
+              remote.turns.push(next);
+              emit({ ...turnEvent(next), event_id: `created_${next.id}` });
+            }
             remote.session.status = "in_progress";
             const text = itemText(request.body.events[0].input[0]);
-            const inputItem = userItem(text, { id: `user_${next.id}`, turn_id: next.id });
+            const inputItem = userItem(text, { id: `user_${remote.items.length + 1}`, turn_id: next.id });
             remote.items.push(inputItem);
-            emit({ ...turnEvent(next), event_id: `created_${next.id}` });
             emit({ type: "agent.session.turn.item.done", item: inputItem });
           }
           if (remote.loseSendResponse) { remote.loseSendResponse = false; throw new Error("Lost send response"); }
@@ -102,6 +105,7 @@ async function boot(t, options = {}) {
   t.after(() => windowEvents.pagehide());
   return {
     elements, button, saved, requests, streams, remote, timers, emit,
+    hide: () => windowEvents.pagehide(),
     get writes() { return writes; },
     text: () => elements.messages.children.filter((node) => node.tag === "article").map((node) => node.textContent),
     status: () => elements["status-text"].textContent,
@@ -186,6 +190,125 @@ test("a lost send response is not an excuse to generate again; explicit resend r
   assert.equal(posts[0].headers.get("idempotency-key"), posts[1].headers.get("idempotency-key"));
   assert.equal(ui.remote.turns.length, 1);
   assert.equal(ui.saved.has(SUBMISSION_KEY), false);
+});
+
+test("HTTP acceptance does not wait for a matching item or a new turn", async (t) => {
+  const ui = await boot(t, { fetch: async ({ method }, { remote }) => {
+    if (method !== "POST") return;
+    remote.session.status = "in_progress";
+    remote.turns.push(turn());
+    return new Response(null, { status: 204 });
+  } });
+  await ui.send("まだ履歴にない入力");
+  assert.equal(ui.saved.has(SUBMISSION_KEY), false);
+  assert.deepEqual(ui.text(), [], "Only saved/streamed items belong in the history");
+  assert.equal(ui.status(), "返答を待っています");
+  assert.equal(ui.button.getAttribute("aria-label"), "停止");
+  assert.equal(ui.button.disabled, false);
+});
+
+test("a stale idle view can send into a turn started by another client", async (t) => {
+  const previous = turn({ status: "completed" });
+  const ui = await boot(t, { remote: { turns: [previous], items: [userItem("以前の入力")] }, fetch: async ({ method }, { remote, emit }) => {
+    if (method === "POST") {
+      // Another client started work after the last snapshot; its turn event was missed.
+      remote.turns.push(turn({ id: "turn_2" }));
+      remote.session.status = "in_progress";
+      const other = userItem("同じ本文", { id: "other_client_input", turn_id: "turn_2" });
+      remote.items.push(other);
+      emit({ type: "agent.session.turn.item.done", item: other });
+    }
+  } });
+  await ui.send("同じ本文");
+  assert.equal(ui.remote.turns.length, 2);
+  assert.equal(ui.saved.has(SUBMISSION_KEY), false);
+  assert.deepEqual(ui.text(), ["以前の入力", "同じ本文", "同じ本文"]);
+  assert.equal(ui.status(), "返答を待っています");
+});
+
+test("a completed turn arriving before its send acknowledgment cannot strand input", async (t) => {
+  const ui = await boot(t, { fetch: async ({ method }, { remote, emit }) => {
+    if (method !== "POST") return;
+    const completed = turn({ status: "completed" });
+    remote.turns.push(completed);
+    remote.items.push(item("返答", { status: "completed" }));
+    emit(turnEvent(completed));
+    return new Response(null, { status: 204 });
+  } });
+  await ui.send("入力");
+  assert.equal(ui.saved.has(SUBMISSION_KEY), false);
+  assert.deepEqual(ui.text(), ["返答"]);
+  assert.equal(ui.button.type, "submit");
+  assert.equal(ui.button.disabled, false);
+});
+
+test("a failed history read after HTTP acceptance does not turn the send into a failed submission", async (t) => {
+  let accepted = false;
+  const ui = await boot(t, { fetch: async ({ method, path }) => {
+    if (method === "POST") accepted = true;
+    if (accepted && path.includes("/items?")) return Response.json({ error: { type: "server_error", code: "internal_error" } }, { status: 503 });
+  } });
+  await ui.send("受け付け済み");
+  assert.equal(ui.saved.has(SUBMISSION_KEY), false);
+  assert.equal(ui.elements["message-input"].value, "");
+  assert.equal(ui.status(), "会話を読み込んでいます", "Acceptance alone does not prove the turn is running");
+  await ui.advance(60_000);
+  assert.equal(ui.elements["status-action"].textContent, "もう一度確認");
+  assert.equal(ui.requests.filter((request) => request.method === "POST").length, 1);
+});
+
+test("an acknowledgment after leaving the page does not reopen its stream", async (t) => {
+  let acknowledge;
+  const ui = await boot(t, { fetch: async ({ method }) => {
+    if (method === "POST") return new Promise((resolve) => { acknowledge = resolve; });
+  } });
+  await ui.send("送信中に閉じる");
+  assert.equal(ui.status(), "送信しています");
+  assert.equal(ui.button.getAttribute("aria-label"), "送信中");
+  assert.equal(ui.button.disabled, true);
+  ui.hide();
+  const count = ui.requests.length;
+  acknowledge(new Response(null, { status: 204 }));
+  await ui.advance(0);
+  assert.equal(ui.saved.has(SUBMISSION_KEY), false);
+  assert.equal(ui.requests.length, count);
+  assert.ok(ui.streams.every((stream) => stream.closed));
+});
+
+test("a non-object error body still preserves the HTTP rejection status", async (t) => {
+  const ui = await boot(t, { fetch: async ({ method }) => method === "POST" ? Response.json(null, { status: 400 }) : undefined });
+  await ui.send("入力は残す");
+  assert.equal(ui.saved.has(SUBMISSION_KEY), false);
+  assert.equal(ui.elements["message-input"].value, "入力は残す");
+  assert.equal(ui.status(), "送れませんでした。入力を残してあります。");
+});
+
+test("reloading restores an unacknowledged send without replaying it automatically", async (t) => {
+  const first = await boot(t, { remote: { loseSendResponse: true } });
+  await first.send("保存する入力");
+  await first.advance(1_000);
+  const pending = JSON.parse(first.saved.get(SUBMISSION_KEY));
+  const reloaded = await boot(t, { saved: new Map(first.saved), remote: first.remote, fetch: async ({ method, headers }) => {
+    if (method !== "POST") return;
+    assert.equal(headers.get("idempotency-key"), pending.idempotency_key);
+    return new Response(null, { status: 204 });
+  } });
+  assert.equal(reloaded.requests.filter((request) => request.method === "POST").length, 0);
+  await reloaded.clickAction();
+  assert.equal(reloaded.remote.turns.length, 1);
+  assert.equal(reloaded.saved.has(SUBMISSION_KEY), false);
+});
+
+test("stop intent is transient; a reload reads the native turn without resending cancellation", async (t) => {
+  const first = await boot(t);
+  await first.send("こんにちは");
+  await first.clickComposer();
+  assert.equal(first.saved.has("ai-simplicity.cancel-turn"), false);
+  const reloaded = await boot(t, { saved: new Map(first.saved), remote: first.remote });
+  assert.equal(reloaded.requests.filter((request) => request.method === "POST").length, 0);
+  assert.equal(reloaded.button.getAttribute("aria-label"), "停止");
+  await reloaded.finish("cancelled", "");
+  assert.deepEqual(reloaded.text(), ["こんにちは", "停止しました"]);
 });
 
 test("the 60-second recovery window begins at disconnection, not at input or reasoning time", async (t) => {
