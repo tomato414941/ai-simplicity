@@ -12,6 +12,7 @@ for (const key of ["OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY",
 }
 
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
+const host = process.env.HOST ?? "127.0.0.1";
 if (!Number.isInteger(port) || port < 0 || port > 65_535) {
   console.error("PORT must be a valid port number.");
   process.exit(1);
@@ -38,8 +39,8 @@ const server = createServer({
   publicConfig: { supabase: { url, publishableKey }, session: sessions.defaults },
 });
 
-server.listen(port, () => {
+server.listen(port, host, () => {
   const address = server.address();
   const activePort = typeof address === "object" ? address.port : port;
-  console.log(`ai-simplicity is listening on http://localhost:${activePort}`);
+  console.log(`ai-simplicity is listening on http://${host}:${activePort}`);
 });
