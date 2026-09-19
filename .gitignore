@@ -4,3 +4,8 @@ supabase/.temp/
 .env
 data/
 *.log
+.env.*
+.expo/
+dist/
+mobile/ios/
+mobile/android/

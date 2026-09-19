@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "AI",
+    "slug": "ai-simplicity",
+    "version": "0.1.0",
+    "scheme": "aisimplicity",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#10110f",
+    "icon": "./assets/icon.png",
+    "ios": {
+      "bundleIdentifier": "com.aisimplicity.app",
+      "supportsTablet": true,
+      "config": { "usesNonExemptEncryption": false },
+      "infoPlist": { "NSAppTransportSecurity": { "NSAllowsArbitraryLoads": false, "NSAllowsLocalNetworking": true } }
+    },
+    "android": {
+      "package": "com.aisimplicity.app",
+      "softwareKeyboardLayoutMode": "resize",
+      "blockedPermissions": ["android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE"]
+    },
+    "plugins": [
+      ["expo-secure-store", { "faceIDPermission": false }],
+      ["expo-splash-screen", { "backgroundColor": "#10110f", "image": "./assets/icon.png", "imageWidth": 128 }]
+    ]
+  }
+}

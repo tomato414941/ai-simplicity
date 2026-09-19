@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "workspaces": ["mobile"],
   "description": "A single, continuous surface for talking with AI.",
   "scripts": {
     "build": "esbuild public/app.js --bundle --format=esm --target=es2022 --minify --outfile=.build/app.js",
@@ -11,7 +12,9 @@
     "prestart": "npm run build",
     "start": "node src/index.js",
     "pretest": "npm run build",
-    "test": "node --test"
+    "test": "node --test test/*.test.js mobile/test/*.test.ts",
+    "mobile": "npm start --workspace mobile",
+    "typecheck": "npm run typecheck --workspace mobile"
   },
   "engines": {
     "node": ">=22"
