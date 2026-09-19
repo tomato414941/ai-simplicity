@@ -1,4 +1,4 @@
-import { SessionState, isTerminal, itemText, readEvents } from "./agent-session.js";
+import { SessionState, isTerminal, itemText, readEvents } from "../shared/agent-session.js";
 import { openAuth } from "./auth.js";
 import { mountAccount } from "./account.js";
 

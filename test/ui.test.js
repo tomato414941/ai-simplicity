@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
-import { SessionState, isTerminal, itemText, readEvents } from "../public/agent-session.js";
+import { SessionState, isTerminal, itemText, readEvents } from "../shared/agent-session.js";
 import { session, turn, item, userItem, page, turnEvent, USER_A, USER_B } from "./helpers.js";
 
 const script = (await readFile(new URL("../public/app.js", import.meta.url), "utf8")).replace(/^import .*\n/gm, "");

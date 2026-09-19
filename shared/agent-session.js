@@ -3,7 +3,7 @@ const isFinalItem = (item) => ["completed", "incomplete"].includes(item?.status)
 export const itemText = (item) => (item?.content ?? [])
   .filter((part) => ["input_text", "output_text"].includes(part.type)).map((part) => part.text).join("");
 
-// Local view of native resources; the HTTP contract has no snapshot/pending model.
+// Shared view of native resources for the web and mobile clients.
 export class SessionState {
   session = null;
   items = new Map();

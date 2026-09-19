@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { UserSessions } from "../src/user-sessions.js";
-import { SessionState, readEvents, itemText } from "../public/agent-session.js";
+import { SessionState, readEvents, itemText } from "../shared/agent-session.js";
 import { session, turn, item, userItem, turnEvent } from "./helpers.js";
 
 test("listing and restarting never allocate an OpenAI environment; creation persists ownership", async () => {
