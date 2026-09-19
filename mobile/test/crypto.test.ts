@@ -5,12 +5,13 @@ import { runInNewContext } from "node:vm";
 import { webcrypto } from "node:crypto";
 import { transform } from "esbuild";
 import { createClient } from "@supabase/supabase-js";
+import { fromByteArray } from "base64-js";
 
 test("the shipped native bridge makes Supabase use secure random PKCE with S256", async (t) => {
   const source = await readFile(new URL("../src/crypto.ts", import.meta.url), "utf8");
   const compiled = await transform(source, { loader: "ts", format: "cjs" });
   let randomCalls = 0, digestCalls = 0;
-  const context = { require: () => ({
+  const context = { require: (name: string) => name === "base64-js" ? { fromByteArray } : ({
     CryptoDigestAlgorithm: { SHA256: "SHA-256" },
     getRandomValues(array: Uint32Array) { randomCalls++; return webcrypto.getRandomValues(array); },
     randomUUID: () => webcrypto.randomUUID(),
@@ -18,8 +19,12 @@ test("the shipped native bridge makes Supabase use secure random PKCE with S256"
   }) } as any;
   runInNewContext(compiled.code, context);
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto")!;
+  const originalBtoa = globalThis.btoa;
   Object.defineProperty(globalThis, "crypto", { configurable: true, value: context.crypto });
-  t.after(() => Object.defineProperty(globalThis, "crypto", descriptor));
+  globalThis.btoa = context.btoa;
+  t.after(() => { Object.defineProperty(globalThis, "crypto", descriptor); globalThis.btoa = originalBtoa; });
+  assert.equal(context.btoa("\x00\xff"), "AP8=");
+  assert.throws(() => context.btoa("日本語"), /binary string/);
   const saved = new Map<string, string>();
   let request: any;
   const { auth } = createClient("https://auth.example.test", "publishable-test", {

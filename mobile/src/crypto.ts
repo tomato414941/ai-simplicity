@@ -1,4 +1,12 @@
 import { CryptoDigestAlgorithm, digest, getRandomValues, randomUUID } from "expo-crypto";
+import { fromByteArray } from "base64-js";
+
+// Hermes does not supply the binary-string Base64 function used by PKCE.
+globalThis.btoa = (value: string) => fromByteArray(Uint8Array.from(value, (character) => {
+  const byte = character.charCodeAt(0);
+  if (byte > 255) throw new TypeError("btoa requires a binary string");
+  return byte;
+}));
 
 // Supabase's PKCE needs these Web Crypto methods. Delegate to the OS via Expo;
 // without this bridge the SDK falls back to Math.random() and a plain challenge.
