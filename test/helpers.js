@@ -63,7 +63,11 @@ export async function app(t, handler, options = {}) {
     return { id, expiresAt: Date.now() + 60_000 };
   });
   const publicConfig = { supabase: { url: "https://example.supabase.co", publishableKey: "sb_publishable_test" }, session: sessions.defaults };
-  const server = createServer({ sessions, authenticate, publicConfig, logger: { error: (value) => logs.push(value) } });
+  const billing = options.billing ?? {
+    balance: async () => { throw new Error("Provide a billing fixture for billing requests."); },
+    history: async () => { throw new Error("Provide a billing fixture for billing requests."); },
+  };
+  const server = createServer({ sessions, billing, authenticate, publicConfig, logger: { error: (value) => logs.push(value) } });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
   return { base: `http://127.0.0.1:${server.address().port}`, requests, logs, server, ownership };

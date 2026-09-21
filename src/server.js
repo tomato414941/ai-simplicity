@@ -11,8 +11,8 @@ const PUBLIC_ASSETS = new Map([
   ["/styles.css", ["styles.css", "text/css"]],
 ]);
 
-export function createServer({ sessions, authenticate, publicConfig, logger = console }) {
-  if (!sessions || typeof authenticate !== "function") throw new Error("Authentication and user-scoped sessions are required.");
+export function createServer({ sessions, billing, authenticate, publicConfig, logger = console }) {
+  if (!sessions || !billing || typeof authenticate !== "function") throw new Error("Authentication, user-scoped sessions and billing are required.");
   return createHttpServer(async (request, response) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "no-referrer");
@@ -26,9 +26,20 @@ export function createServer({ sessions, authenticate, publicConfig, logger = co
       if (method === "GET" && url.pathname === "/api/health") return sendJson(response, 200, { ok: true });
       if (method === "GET" && url.pathname === "/api/config") return sendJson(response, 200, publicConfig);
 
-      const user = (url.pathname === PREFIX || url.pathname.startsWith(PREFIX + "/")) ? await authenticate(request) : null;
+      const isBilling = url.pathname === "/api/billing" || url.pathname.startsWith("/api/billing/");
+      const user = (isBilling || url.pathname === PREFIX || url.pathname.startsWith(PREFIX + "/")) ? await authenticate(request) : null;
       if (user && method === "POST" && request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) {
         throw Object.assign(invalid("Origin is not allowed."), { status: 403 });
+      }
+
+      if (method === "GET" && url.pathname === "/api/billing") {
+        noQuery(url);
+        return sendJson(response, 200, { ...await billing.balance(user.id, options), pricing_status: "unconfigured" });
+      }
+      if (method === "GET" && url.pathname === "/api/billing/entries") {
+        const query = listQuery(url);
+        if (query.order !== undefined) throw invalid("Unsupported parameter.", "order");
+        return sendJson(response, 200, await billing.history(user.id, query, options));
       }
 
       if (method === "GET" && url.pathname === PREFIX) {

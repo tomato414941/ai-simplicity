@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { createAuthenticator } from "./auth.js";
 import { UserSessions, SupabaseSessionStore } from "./user-sessions.js";
 import { createServer } from "./server.js";
+import { Billing } from "./billing.js";
 
 for (const key of ["OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_SECRET_KEY"]) {
   if (!process.env[key]) {
@@ -35,7 +36,7 @@ const sessions = new UserSessions({
   store: new SupabaseSessionStore(database),
 });
 const server = createServer({
-  sessions, authenticate: createAuthenticator({ auth: verifier.auth, url }),
+  sessions, billing: new Billing(database), authenticate: createAuthenticator({ auth: verifier.auth, url }),
   publicConfig: { supabase: { url, publishableKey }, session: sessions.defaults },
 });
 
