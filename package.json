@@ -13,6 +13,7 @@
     "start": "node src/index.js",
     "pretest": "npm run build",
     "test": "node --test test/*.test.js mobile/test/*.test.ts",
+    "test:billing-db": "node --test test/billing-db.integration.js",
     "mobile": "npm start --workspace mobile",
     "typecheck": "npm run typecheck --workspace mobile"
   },
