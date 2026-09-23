@@ -83,6 +83,7 @@ async function start() {
     if (!auth) {
       ({ auth, sessionDefaults } = await openAuth());
       account = mountAccount({ auth, getUser: () => identity?.user,
+        request: (path, signal) => jsonRequest(path, {}, signal),
         hasConversation: () => Boolean(state.session || submission || input.value.trim()),
         signOut: async () => {
           const result = await auth.signOut({ scope: "local" });
@@ -153,13 +154,13 @@ function recoveryRemaining() {
   return unavailableSince === null ? Infinity : Math.max(0, RECOVERY_WINDOW_MS - (Date.now() - unavailableSince));
 }
 
-async function jsonRequest(url, options = {}, signal) {
+async function jsonRequest(url, { timeout = REQUEST_TIMEOUT_MS, ...options } = {}, signal) {
   const owner = identity;
   if (!owner) throw new Error("Authentication required.");
   const response = await fetch(url, {
     ...options,
     headers: { "content-type": "application/json", "OpenAI-Beta": "agents=v1", ...options.headers, Authorization: `Bearer ${owner.token}` },
-    signal: AbortSignal.any([owner.controller.signal, ...(signal ? [signal] : []), AbortSignal.timeout(signal ? Math.max(1, Math.min(REQUEST_TIMEOUT_MS, recoveryRemaining())) : REQUEST_TIMEOUT_MS)]),
+    signal: AbortSignal.any([owner.controller.signal, ...(signal ? [signal] : []), AbortSignal.timeout(Math.max(1, Math.min(REQUEST_TIMEOUT_MS, timeout)))]),
   });
   if (owner !== identity) throw new Error("Account changed.");
   if (!response.ok) {
@@ -179,7 +180,7 @@ async function allPages(path, signal) {
   let after;
   do {
     const query = new URLSearchParams({ order: "asc", limit: "100", ...(after ? { after } : {}) });
-    const page = await jsonRequest(`${path}?${query}`, {}, signal);
+    const page = await jsonRequest(`${path}?${query}`, { timeout: recoveryRemaining() }, signal);
     data.push(...page.data);
     if (!page.has_more) return data;
     if (!page.last_id || page.last_id === after) throw new Error("Invalid pagination cursor.");
@@ -198,7 +199,7 @@ async function connect() {
   render();
   try {
     if (!state.session) {
-      const page = await jsonRequest("/v1/agents/sessions?limit=1", {}, current.controller.signal);
+      const page = await jsonRequest("/v1/agents/sessions?limit=1", { timeout: recoveryRemaining() }, current.controller.signal);
       if (connection !== current) return;
       state.session = page.data[0] ?? null;
       if (!state.session) {
@@ -244,7 +245,7 @@ async function synchronize(current) {
   current.ready = false;
   current.syncing = (async () => {
     const [session, items, turns] = await Promise.all([
-      jsonRequest(base(), {}, current.controller.signal),
+      jsonRequest(base(), { timeout: recoveryRemaining() }, current.controller.signal),
       allPages(`${base()}/items`, current.controller.signal),
       allPages(`${base()}/turns`, current.controller.signal),
     ]);

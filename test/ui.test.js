@@ -65,7 +65,7 @@ async function boot(t, options = {}) {
     clearTimeout: (id) => timers.delete(id),
     fetch: async (path, fetchOptions = {}) => {
       const url = new URL(path, "http://app.test");
-      const request = { path, method: fetchOptions.method ?? "GET", body: fetchOptions.body ? JSON.parse(fetchOptions.body) : null, headers: new Headers(fetchOptions.headers) };
+      const request = { path, method: fetchOptions.method ?? "GET", body: fetchOptions.body ? JSON.parse(fetchOptions.body) : null, headers: new Headers(fetchOptions.headers), signal: fetchOptions.signal };
       requests.push(request);
       if (!remote.online) throw new Error("Offline");
       const override = await options.fetch?.(request, { remote, emit, streams });
@@ -517,6 +517,52 @@ test("first visit is authenticated but creates an OpenAI session only on the fir
   assert.ok(ui.requests.findIndex((r) => r.path.endsWith("/events") && r.method === "GET") < ui.requests.findIndex((r) => r.body?.events));
   assert.ok(ui.requests.every((r) => r.headers.get("authorization") === "Bearer user-a-token"));
   assert.deepEqual(ui.text(), ["はじめまして"]);
+});
+
+test("利用状況の取得に現在のアカウントの認証と画面のキャンセルを適用する", async (t) => {
+  const ui = await boot(t, { fetch: async ({ path }) => {
+    if (path === "/api/billing") return Response.json({ balance: "100" });
+  } });
+  const controller = new AbortController();
+  assert.deepEqual(await ui.accountOptions.request("/api/billing", controller.signal), { balance: "100" });
+  const first = ui.requests.at(-1);
+  assert.equal(first.method, "GET");
+  assert.equal(first.headers.get("authorization"), "Bearer user-a-token");
+  assert.equal(first.signal.aborted, false);
+  controller.abort();
+  assert.equal(first.signal.aborted, true);
+  await ui.authenticate({ user: { id: USER_B, is_anonymous: true }, access_token: "user-b-token" });
+  await ui.accountOptions.request("/api/billing", new AbortController().signal);
+  assert.equal(ui.requests.at(-1).headers.get("authorization"), "Bearer user-b-token");
+});
+
+test("アカウント切り替え後に届く以前の残高の応答を破棄する", async (t) => {
+  let finish;
+  const ui = await boot(t, { fetch: async ({ path }) => {
+    if (path === "/api/billing") return new Promise((resolve) => { finish = resolve; });
+  } });
+  const pending = ui.accountOptions.request("/api/billing", new AbortController().signal);
+  const rejected = assert.rejects(pending, /Account changed/);
+  const request = ui.requests.at(-1);
+  await ui.authenticate({ user: { id: USER_B, is_anonymous: true }, access_token: "user-b-token" });
+  assert.equal(request.signal.aborted, true);
+  finish(Response.json({ balance: "100" }));
+  await rejected;
+});
+
+test("チャットの再接続が終了した後も利用状況を読み込む", async (t) => {
+  const ui = await boot(t, { fetch: async ({ path, signal }) => {
+    if (path === "/api/billing") {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      signal.throwIfAborted();
+      return Response.json({ balance: "100" });
+    }
+  } });
+  ui.remote.online = false;
+  await ui.disconnect();
+  await ui.advance(60_000);
+  ui.remote.online = true;
+  assert.deepEqual(await ui.accountOptions.request("/api/billing", new AbortController().signal), { balance: "100" });
 });
 
 test("unscoped legacy data and another user's drafts or pending sends never enter a new user's view", async (t) => {

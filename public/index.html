@@ -49,18 +49,45 @@
       </form>
     </main>
 
-    <dialog id="account-dialog" class="account-dialog" aria-labelledby="account-title" aria-describedby="account-description">
+    <dialog id="account-dialog" class="account-dialog" aria-labelledby="account-heading">
       <button id="account-close" class="account-close" type="button" aria-label="閉じる">×</button>
-      <h1 id="account-title">この会話を引き継ぐ</h1>
-      <p id="account-description"></p>
-      <form id="account-form">
-        <label for="account-email">メールアドレス</label>
-        <input id="account-email" type="email" name="email" autocomplete="email" inputmode="email" required />
-        <button id="account-send" type="submit">メールを送る</button>
-      </form>
-      <p id="account-status" role="status"></p>
-      <button id="account-toggle" class="text-button" type="button">登録済みのメールでログイン</button>
-      <button id="account-logout" class="text-button" type="button" hidden>この端末からログアウト</button>
+      <h1 id="account-heading">アカウント</h1>
+      <section id="account-usage" class="account-usage" aria-labelledby="account-usage-heading" hidden>
+        <div class="account-section-heading">
+          <h2 id="account-usage-heading">利用状況</h2>
+          <button id="account-usage-refresh" class="text-button" type="button" aria-label="利用状況を更新">更新</button>
+        </div>
+        <p id="account-usage-status" role="status"></p>
+        <div id="account-usage-body" hidden>
+          <p id="account-usage-notice" class="usage-notice" hidden>現在はクレジットを消費せずに利用できます。</p>
+          <dl class="credit-balance">
+            <div class="credit-available">
+              <dt>利用可能</dt>
+              <dd><span id="account-usage-available">—</span><span class="credit-unit">クレジット</span></dd>
+            </div>
+            <div><dt>残高</dt><dd id="account-usage-balance">—</dd></div>
+            <div><dt>確保中</dt><dd id="account-usage-reserved">—</dd></div>
+          </dl>
+          <p id="account-usage-hold-note" class="credit-note" hidden>確保中の分は、利用可能な残高に含まれません。</p>
+          <h3 class="credit-history-heading">残高の履歴</h3>
+          <ol id="account-usage-entries" class="credit-entries"></ol>
+          <p id="account-usage-empty" class="credit-empty" hidden>残高の変更はまだありません。</p>
+          <p id="account-usage-page-status" role="status"></p>
+          <button id="account-usage-more" class="text-button" type="button" hidden>もっと見る</button>
+        </div>
+      </section>
+      <section class="account-identity" aria-labelledby="account-title">
+        <h2 id="account-title">この会話を引き継ぐ</h2>
+        <p id="account-description"></p>
+        <form id="account-form">
+          <label for="account-email">メールアドレス</label>
+          <input id="account-email" type="email" name="email" autocomplete="email" inputmode="email" required />
+          <button id="account-send" type="submit">メールを送る</button>
+        </form>
+        <p id="account-status" role="status"></p>
+        <button id="account-toggle" class="text-button" type="button">登録済みのメールでログイン</button>
+        <button id="account-logout" class="text-button" type="button" hidden>この端末からログアウト</button>
+      </section>
     </dialog>
 
     <script type="module" src="/app.js"></script>

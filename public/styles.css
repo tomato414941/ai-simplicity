@@ -95,6 +95,7 @@ textarea {
 
 .account-dialog::backdrop { background: #0009; backdrop-filter: blur(5px); }
 .account-dialog h1 { margin: 0 24px 16px 0; font-size: 1.25rem; font-weight: 500; }
+.account-dialog h2 { margin: 0; font-size: 0.95rem; font-weight: 500; }
 .account-dialog p { white-space: pre-line; overflow-wrap: anywhere; font-size: 0.9rem; line-height: 1.8; color: var(--ink-soft); }
 .account-close { position: absolute; top: 8px; right: 8px; min-width: 44px; font-size: 1.6rem; }
 .account-dialog form { display: grid; gap: 12px; margin-top: 24px; }
@@ -103,6 +104,29 @@ textarea {
 .account-dialog form button { min-height: 48px; border: 0; border-radius: 12px; background: var(--action); color: #171815; cursor: pointer; }
 .account-dialog button:disabled { opacity: 0.5; cursor: wait; }
 .account-dialog .text-button { padding-left: 0; text-align: left; font-size: 0.85rem; }
+.account-dialog p:empty { display: none; }
+.account-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.account-section-heading .text-button { padding-right: 0; }
+.account-usage { padding-bottom: 24px; }
+.account-identity { padding-top: 24px; border-top: 1px solid #363a32; }
+.account-usage[hidden] + .account-identity { padding-top: 8px; border-top: 0; }
+.account-dialog .usage-notice { margin: 4px 0 20px; color: var(--ink); }
+.credit-balance { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px 24px; margin: 0; }
+.credit-balance dt { color: var(--ink-soft); font-size: 0.75rem; }
+.credit-balance dd { margin: 6px 0 0; overflow-wrap: anywhere; font-size: 0.95rem; font-variant-numeric: tabular-nums; }
+.credit-available { grid-column: 1 / -1; padding: 18px 0; border-block: 1px solid #363a32; }
+.credit-available dd { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; font-size: clamp(1.3rem, 5vw, 1.8rem); letter-spacing: 0.02em; }
+.credit-available dd > span { min-width: 0; }
+.credit-unit { color: var(--ink-soft); font-size: 0.75rem; letter-spacing: 0; }
+.account-dialog .credit-note { margin: 12px 0 0; font-size: 0.75rem; }
+.credit-history-heading { margin: 28px 0 8px; font-size: 0.8rem; font-weight: 500; }
+.credit-entries { margin: 0; padding: 0; list-style: none; }
+.credit-entries li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto); align-items: start; gap: 8px 16px; padding: 14px 0; border-bottom: 1px solid #363a32; font-size: 0.85rem; }
+.credit-entries li > div { min-width: 0; }
+.credit-entries time { display: block; margin-top: 4px; color: var(--ink-soft); font-size: 0.7rem; }
+.credit-entry-amount { max-width: 16ch; overflow-wrap: anywhere; text-align: right; font-variant-numeric: tabular-nums; }
+.credit-entry-amount.is-credit { color: #b3c8ab; }
+.account-dialog .credit-empty { margin: 8px 0 0; font-size: 0.8rem; }
 button:focus-visible,
 .account-dialog input:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 
