@@ -102,7 +102,9 @@ export async function* readEvents(body) {
       if (done) return; // An EOF does not imply a completed turn.
     }
   } finally {
-    await reader.cancel().catch(() => {});
+    // A tee branch's cancellation waits for its sibling. Request cancellation
+    // without blocking parser completion on that independent consumer.
+    void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }

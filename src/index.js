@@ -4,6 +4,7 @@ import { createAuthenticator } from "./auth.js";
 import { UserSessions, SupabaseSessionStore } from "./user-sessions.js";
 import { createServer } from "./server.js";
 import { Billing } from "./billing.js";
+import { UserResponses, SupabaseResponseStore } from "./user-responses.js";
 
 for (const key of ["OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_SECRET_KEY"]) {
   if (!process.env[key]) {
@@ -30,12 +31,14 @@ const supabaseOptions = {
 };
 const verifier = createClient(url, publishableKey, supabaseOptions);
 const database = createClient(url, process.env.SUPABASE_SECRET_KEY, supabaseOptions);
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const model = process.env.OPENAI_MODEL ?? "gpt-6-astra";
 const sessions = new UserSessions({
-  client: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
-  model: process.env.OPENAI_MODEL ?? "gpt-6-astra",
+  client, model,
   store: new SupabaseSessionStore(database),
 });
 const server = createServer({
+  responses: new UserResponses({ client, model, store: new SupabaseResponseStore(database) }),
   sessions, billing: new Billing(database), authenticate: createAuthenticator({ auth: verifier.auth, url }),
   publicConfig: { supabase: { url, publishableKey }, session: sessions.defaults },
 });

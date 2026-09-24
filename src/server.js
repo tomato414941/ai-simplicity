@@ -11,8 +11,8 @@ const PUBLIC_ASSETS = new Map([
   ["/styles.css", ["styles.css", "text/css"]],
 ]);
 
-export function createServer({ sessions, billing, authenticate, publicConfig, logger = console }) {
-  if (!sessions || !billing || typeof authenticate !== "function") throw new Error("Authentication, user-scoped sessions and billing are required.");
+export function createServer({ sessions, responses, billing, authenticate, publicConfig, logger = console }) {
+  if (!sessions || !responses || !billing || typeof authenticate !== "function") throw new Error("Authentication, user-scoped sessions, responses and billing are required.");
   return createHttpServer(async (request, response) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "no-referrer");
@@ -27,9 +27,37 @@ export function createServer({ sessions, billing, authenticate, publicConfig, lo
       if (method === "GET" && url.pathname === "/api/config") return sendJson(response, 200, publicConfig);
 
       const isBilling = url.pathname === "/api/billing" || url.pathname.startsWith("/api/billing/");
-      const user = (isBilling || url.pathname === PREFIX || url.pathname.startsWith(PREFIX + "/")) ? await authenticate(request) : null;
-      if (user && method === "POST" && request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) {
+      const isResponses = url.pathname === "/v1/responses" || url.pathname.startsWith("/v1/responses/");
+      const user = (isBilling || isResponses || url.pathname === PREFIX || url.pathname.startsWith(PREFIX + "/")) ? await authenticate(request) : null;
+      if (user && ["POST", "DELETE"].includes(method) && request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) {
         throw Object.assign(invalid("Origin is not allowed."), { status: 403 });
+      }
+
+      if (isResponses) {
+        const expiry = setTimeout(() => { controller.abort(); response.destroy(); }, Math.max(1, Math.min(user.expiresAt - Date.now(), 2_147_483_647)));
+        expiry.unref();
+        response.once("close", () => clearTimeout(expiry));
+        let upstream;
+        if (method === "POST" && ["/v1/responses", "/v1/responses/compact", "/v1/responses/input_tokens"].includes(url.pathname)) {
+          noQuery(url);
+          const body = await readJson(request);
+          if (url.pathname === "/v1/responses") upstream = await responses.create(user.id, body, request.headers["idempotency-key"], options);
+          else if (url.pathname.endsWith("/compact")) upstream = await responses.compact(user.id, body, options);
+          else upstream = await responses.inputTokens(user.id, body, options);
+        } else {
+          const resource = url.pathname.match(/^\/v1\/responses\/(resp_[\w-]+)(?:\/(cancel|input_items))?$/);
+          if (!resource) throw notFound();
+          const [, id, action] = resource;
+          if (method === "GET" && !action) upstream = await responses.retrieve(user.id, id, responseQuery(url), options);
+          else if (method === "GET" && action === "input_items") upstream = await responses.inputItems(user.id, id, responseQuery(url, true), options);
+          else if (method === "DELETE" && !action) { noQuery(url); upstream = await responses.delete(user.id, id, options); }
+          else if (method === "POST" && action === "cancel") {
+            noQuery(url);
+            if (request.headers["transfer-encoding"] || Number(request.headers["content-length"] ?? 0) > 0) fields(await readJson(request), [], null);
+            upstream = await responses.cancel(user.id, id, options);
+          } else throw notFound();
+        }
+        return await relayResponse(upstream, response, options);
       }
 
       if (method === "GET" && url.pathname === "/api/billing") {
@@ -134,6 +162,45 @@ export function createServer({ sessions, billing, authenticate, publicConfig, lo
       } });
     }
   });
+}
+
+async function relayResponse(upstream, response, options) {
+  if (response.destroyed) { await upstream.body?.cancel(); return; }
+  const stream = upstream.headers.get("content-type")?.startsWith("text/event-stream");
+  for (const name of ["content-type", "x-request-id", "retry-after", "retry-after-ms", "x-should-retry"]) {
+    const value = upstream.headers.get(name);
+    if (value !== null) response.setHeader(name, value);
+  }
+  response.setHeader("cache-control", stream ? "no-cache, no-transform" : "no-store");
+  if (stream) response.setHeader("x-accel-buffering", "no");
+  response.writeHead(upstream.status);
+  response.flushHeaders();
+  if (upstream.body) for await (const chunk of upstream.body) {
+    if (!response.write(chunk)) await once(response, "drain", options);
+  }
+  response.end();
+}
+
+function responseQuery(url, items = false) {
+  const query = {};
+  const allowed = items ? ["include", "after", "limit", "order"] : ["include", "stream", "starting_after", "include_obfuscation"];
+  for (const [raw, value] of url.searchParams) {
+    const key = raw === "include[]" ? "include" : raw;
+    if (!allowed.includes(key) || (key !== "include" && Object.hasOwn(query, key))) throw invalid("Unsupported parameter.", raw);
+    if (key === "include") (query.include ??= []).push(value);
+    else if (["stream", "include_obfuscation"].includes(key)) {
+      if (!["true", "false"].includes(value)) throw invalid("Expected a boolean.", key);
+      query[key] = value === "true";
+    } else if (["limit", "starting_after"].includes(key)) {
+      const number = Number(value);
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(number) || number < (key === "limit" ? 1 : 0) || (key === "limit" && number > 100)) throw invalid("Invalid integer.", key);
+      query[key] = number;
+    } else {
+      if (!value || (key === "order" && !["asc", "desc"].includes(value))) throw invalid("Invalid parameter.", key);
+      query[key] = value;
+    }
+  }
+  return query;
 }
 
 function listQuery(url, extra = []) {

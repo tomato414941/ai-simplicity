@@ -56,12 +56,27 @@ before(async () => {
     create schema auth; create table auth.users (id uuid primary key);
     alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
     alter default privileges in schema public grant all on functions to anon, authenticated, service_role;`, "postgres");
-  for (const name of ["202609140001_agent_sessions.sql", "202609210001_billing.sql"]) {
+  for (const name of ["202609140001_agent_sessions.sql", "202609210001_billing.sql", "202609240001_responses.sql"]) {
     await sql(await readFile(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"), "postgres");
   }
 }, { timeout: 30_000 });
 
 after(async () => { if (started) await exec("docker", ["rm", "--force", container]); });
+
+test("Responseの所有者をサーバーだけが登録し既存の所有者を保護する", async () => {
+  const owner = await user("0"), other = await user("0");
+  await sql(`insert into public.responses (id, user_id) values ('resp_test', ${literal(owner)});`);
+  assert.equal((await value("select user_id from public.responses where id = 'resp_test'")).user_id, owner);
+  await assert.rejects(sql(`insert into public.responses (id, user_id) values ('resp_test', ${literal(other)});`), /duplicate key/);
+  await assert.rejects(sql(`update public.responses set user_id = ${literal(other)} where id = 'resp_test';`), /permission denied/);
+  for (const role of ["anon", "authenticated"]) {
+    await assert.rejects(sql("select * from public.responses;", role), /permission denied/);
+    await assert.rejects(sql(`insert into public.responses (id, user_id) values ('resp_forged', ${literal(other)});`, role), /permission denied/);
+  }
+  await sql("grant select on public.responses to authenticated;", "postgres");
+  assert.equal((await value("select count(*)::int as count from public.responses", "authenticated")).count, 0);
+  await sql("revoke select on public.responses from authenticated;", "postgres");
+});
 
 test("複数の同時予約に対して利用可能な残高だけを確保する", async () => {
   const userId = await user();

@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { createServer } from "../src/server.js";
 import { UserSessions } from "../src/user-sessions.js";
 import { unauthorized } from "../src/auth.js";
+import { UserResponses } from "../src/user-responses.js";
 
 export const USER_A = "11111111-1111-4111-8111-111111111111";
 export const USER_B = "22222222-2222-4222-8222-222222222222";
@@ -67,8 +68,16 @@ export async function app(t, handler, options = {}) {
     balance: async () => { throw new Error("Provide a billing fixture for billing requests."); },
     history: async () => { throw new Error("Provide a billing fixture for billing requests."); },
   };
-  const server = createServer({ sessions, billing, authenticate, publicConfig, logger: { error: (value) => logs.push(value) } });
+  const responseOwners = options.responseOwners ?? new Map();
+  const responses = new UserResponses({ client, model: "gpt-6-astra", store: options.responseStore ?? {
+    owns: async (userId, id) => responseOwners.get(id) === userId,
+    save: async (userId, id) => {
+      if (responseOwners.has(id) && responseOwners.get(id) !== userId) throw Object.assign(new Error("Conflicting owner"), { status: 503 });
+      responseOwners.set(id, userId);
+    },
+  } });
+  const server = createServer({ sessions, responses, billing, authenticate, publicConfig, logger: { error: (value) => logs.push(value) } });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
-  return { base: `http://127.0.0.1:${server.address().port}`, requests, logs, server, ownership };
+  return { base: `http://127.0.0.1:${server.address().port}`, requests, logs, server, ownership, responseOwners };
 }
