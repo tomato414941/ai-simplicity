@@ -44,7 +44,7 @@ const sessions = new UserSessions({
 });
 const billing = new Billing(database);
 const server = createServer({
-  responses: new UserResponses({ ...responseConfiguration(process.env), store: new SupabaseResponseStore(database), billing }),
+  responses: new UserResponses({ ...responseConfiguration(process.env), store: new SupabaseResponseStore(database), billing, foundation, keys: new SupabaseFoundationKeyStore(database) }),
   sessions, billing, authenticate: createAuthenticator({ auth: verifier.auth, url }), foundation,
   publicConfig: { supabase: { url, publishableKey }, session: sessions.defaults },
 });

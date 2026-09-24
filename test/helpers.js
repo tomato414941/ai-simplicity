@@ -84,7 +84,9 @@ export async function app(t, handler, options = {}) {
   }]));
   const configuration = responseConfiguration({ OPENAI_API_KEY: "test-key", OPENROUTER_API_KEY: "router-key", ANTHROPIC_API_KEY: "anthropic-key",
     ...(options.models ? { RESPONSES_MODELS: JSON.stringify(options.models) } : {}) }, transport);
-  const responses = new UserResponses({ ...configuration, billing, store: options.responseStore ?? {
+  const foundationKeys = options.foundationKeys ?? new Map();
+  const responses = new UserResponses({ ...configuration, billing, foundation: options.foundation ?? null,
+    keys: { read: async (id) => foundationKeys.get(id) ?? null, write: async (id, keyId) => foundationKeys.set(id, keyId) }, store: options.responseStore ?? {
     read: async (userId, id) => responseOwners.get(id) === userId ? structuredClone(responseRecords.get(id)) : null,
     save: async (userId, record) => {
       if (responseOwners.has(record.id) && responseOwners.get(record.id) !== userId) throw Object.assign(new Error("Conflicting owner"), { status: 503 });

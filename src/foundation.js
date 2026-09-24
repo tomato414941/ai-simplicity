@@ -11,6 +11,29 @@ export class Foundation {
     this.integrationKey = integrationKey ?? null;
     this.webhookSecret = webhookSecret ?? null;
     this.fetch = fetchImpl;
+    // The key each user's requests carry, held only in memory. After a restart a new one is issued, and the
+    // previous one (its ID is all that is stored) is revoked with it.
+    this.cache = new Map();
+  }
+
+  async keyFor(userId, keys) {
+    if (this.cache.has(userId)) return this.cache.get(userId);
+    const key = await this.issueKey(userId, await keys.read(userId));
+    await keys.write(userId, key.id);
+    this.cache.set(userId, key.token);
+    return key.token;
+  }
+
+  // For the Responses API: the same MCP connection, as that API spells it.
+  responsesTool(key) {
+    return { type: "mcp", server_label: "foundation", server_url: this.url + "/mcp", authorization: "Bearer " + key, require_approval: "never",
+      server_description: "This person's Foundation account: keys, secrets and connections they keep for you. Call foundation_guide first." };
+  }
+
+  // A response echoes its tools. The connection's authorization must not come back with it.
+  static redact(value) {
+    if (!Array.isArray(value?.tools)) return value;
+    return { ...value, tools: value.tools.map((tool) => tool?.type === "mcp" ? Object.fromEntries(Object.entries(tool).filter(([name]) => !["authorization", "headers"].includes(name))) : tool) };
   }
 
   get enabled() { return Boolean(this.url && this.integrationKey); }

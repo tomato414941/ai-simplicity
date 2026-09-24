@@ -92,3 +92,35 @@ test("the Foundation page is served, and the links route is absent when Foundati
   assert.equal((await fetch(base + "/foundation?foundation_request=" + requestId)).status, 200);
   assert.equal((await authFetch(base + "/api/foundation/links", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request_id: requestId }) })).status, 404);
 });
+
+test("a Responses request to the managed OpenAI model carries this user's Foundation connection; the key never comes back", async (t) => {
+  const { calls, foundation, url } = await fakeFoundation(t);
+  const foundationKeys = new Map([[USER_A, "key-old"]]);
+  const echoed = { id: "resp_a", object: "response", created_at: 1, status: "completed", model: "gpt-6-astra", output: [], usage: { input_tokens: 1, output_tokens: 1 },
+    tools: [{ type: "web_search" }, { type: "mcp", server_label: "foundation", server_url: url + "/mcp", authorization: "Bearer fdn_" + "x".repeat(43) }] };
+  const { base, requests } = await app(t, () => Response.json(echoed), { foundation, foundationKeys });
+  const body = JSON.stringify({ model: "gpt-6-astra", input: "hi", tools: [{ type: "web_search" }], instructions: "Be brief." });
+  const create = async () => authFetch(base + "/v1/responses", { method: "POST", headers: { "content-type": "application/json" }, body });
+  const first = await (await create()).json();
+  const sent = requests.at(-1).body;
+  const tool = sent.tools.find((item) => item.type === "mcp");
+  assert.equal(tool.server_url, url + "/mcp"); assert.match(tool.authorization, /^Bearer fdn_/); assert.equal(tool.require_approval, "never");
+  assert.match(sent.instructions, /^Be brief\./); assert.match(sent.instructions, /foundation_guide/);
+  assert.deepEqual(first.tools.find((item) => item.type === "mcp"), { type: "mcp", server_label: "foundation", server_url: url + "/mcp" }, "what comes back is redacted");
+  assert.doesNotMatch(JSON.stringify(first), /fdn_/);
+  await create();
+  assert.equal(calls.filter((call) => call.path.endsWith("/keys")).length, 1, "one key per user, issued once and reused");
+  assert.equal(calls.find((call) => call.path.endsWith("/keys")).body.replaces, "key-old");
+  assert.equal(foundationKeys.get(USER_A), "key-2");
+});
+
+test("a Responses request to another provider carries no Foundation connection", async (t) => {
+  const { calls, foundation } = await fakeFoundation(t);
+  const { base, requests } = await app(t, () => Response.json({ id: "resp_r", object: "response", created_at: 1, status: "completed", model: "router", output: [], usage: {} }), { foundation });
+  const models = await (await authFetch(base + "/v1/models")).json();
+  const routed = models.data.find((item) => item.owned_by !== "openai");
+  if (!routed) return;
+  await authFetch(base + "/v1/responses", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: routed.id, input: "hi" }) });
+  assert.equal((requests.at(-1).body.tools ?? []).some((item) => item.type === "mcp"), false);
+  assert.equal(calls.length, 0);
+});
