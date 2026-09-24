@@ -56,19 +56,19 @@ export class Foundation {
   // The user's account (made on first use), and a fresh key. The key it replaces is revoked in the same
   // call, so a rebuilt conversation never leaves an old key alive.
   async issueKey(userId, replaces) {
-    await this.call("PUT", "/v1/integration/accounts/" + encodeURIComponent(userId), {});
-    const { key } = await this.call("POST", "/v1/integration/accounts/" + encodeURIComponent(userId) + "/keys", { name: KEY_NAME, ...(replaces ? { replaces } : {}) });
+    await this.call("PUT", "/v1/accounts/" + encodeURIComponent(userId), {});
+    const { key } = await this.call("POST", "/v1/accounts/" + encodeURIComponent(userId) + "/keys", { name: KEY_NAME, ...(replaces ? { replaces } : {}) });
     return key;
   }
 
   async revokeKey(userId, keyId) {
-    await this.call("DELETE", "/v1/integration/accounts/" + encodeURIComponent(userId) + "/keys/" + encodeURIComponent(keyId), {});
+    await this.call("DELETE", "/v1/accounts/" + encodeURIComponent(userId) + "/keys/" + encodeURIComponent(keyId), {});
   }
 
   // A single-use link to one of this user's requests, made only after we checked who is asking.
   async link(userId, requestId) {
     if (typeof requestId !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(requestId)) throw Object.assign(new Error("Unknown request."), { status: 404, local: true });
-    const { url } = await this.call("POST", "/v1/integration/links", { request_id: requestId, external_id: userId });
+    const { url } = await this.call("POST", "/v1/request-links", { request_id: requestId, external_id: userId });
     return url;
   }
 

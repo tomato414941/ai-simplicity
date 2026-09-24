@@ -14,10 +14,10 @@ async function fakeFoundation(t) {
     calls.push({ method: request.method, path: request.url, authorization: request.headers.authorization, body: body ? JSON.parse(body) : null });
     const reply = (status, data) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(data)); };
     if (request.headers.authorization !== "Bearer fdni_test") return reply(401, { error: { code: "not_an_integration" } });
-    if (request.method === "PUT" && /^\/v1\/integration\/accounts\/[^/]+$/.test(request.url)) return reply(200, { account: { id: "acct-1" } });
+    if (request.method === "PUT" && /^\/v1\/accounts\/[^/]+$/.test(request.url)) return reply(200, { account: { id: "acct-1" } });
     if (request.method === "POST" && request.url.endsWith("/keys")) return reply(201, { key: { id: "key-" + calls.length, name: "ai-simplicity", token: "fdn_" + "x".repeat(43) } });
     if (request.method === "DELETE" && request.url.includes("/keys/")) return reply(200, { ok: true });
-    if (request.method === "POST" && request.url === "/v1/integration/links") {
+    if (request.method === "POST" && request.url === "/v1/request-links") {
       const { request_id, external_id } = calls.at(-1).body;
       if (external_id !== USER_A) return reply(404, { error: { code: "not_found" } });
       return reply(201, { url: "http://foundation.test/requests/" + request_id + "#link=abc" });
@@ -39,7 +39,7 @@ test("creating a conversation gives it a key to the user's Foundation account ov
   foundation.keys = { read: async (id) => keys.get(id) ?? null, write: async (id, keyId) => keys.set(id, keyId) };
   const sessions = new UserSessions({ client, model: "gpt-6-astra", store, tools: [foundation] });
   await sessions.create("user", sessions.defaults);
-  assert.deepEqual(calls.map((call) => [call.method, call.path]), [["PUT", "/v1/integration/accounts/user"], ["POST", "/v1/integration/accounts/user/keys"]]);
+  assert.deepEqual(calls.map((call) => [call.method, call.path]), [["PUT", "/v1/accounts/user"], ["POST", "/v1/accounts/user/keys"]]);
   assert.equal(calls[1].body.replaces, "key-old", "the previous conversation's key is revoked with the new one");
   const tool = created[0].agent.tools.find((item) => item.type === "mcp");
   assert.equal(tool.transport.server_url, url + "/mcp");
