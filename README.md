@@ -23,7 +23,7 @@ npm test
 | `FOUNDATION_URL` / `FOUNDATION_INTEGRATION_KEY` / `FOUNDATION_WEBHOOK_SECRET` | 任意。[Foundation](https://github.com/tomato414941/foundation) との連携 |
 | `HOST` / `PORT` | 初期値は `127.0.0.1` / `3000` |
 
-データベースの定義は `supabase/migrations/` にあります。順に Supabase へ当ててください。
+データベースへの変更は、日時順の SQL として `supabase/migrations/` にあります。`supabase link` でプロジェクトにつないでから、`supabase db push` で当てます。
 
 モバイルアプリ（Expo）は `mobile/` にあります。`EXPO_PUBLIC_API_URL` にサーバーの URL を入れて `npm start` します。
 
