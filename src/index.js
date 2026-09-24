@@ -36,15 +36,14 @@ const database = createClient(url, process.env.SUPABASE_SECRET_KEY, supabaseOpti
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const model = process.env.OPENAI_MODEL ?? "gpt-6-astra";
 // Foundation is optional: without FOUNDATION_URL and FOUNDATION_INTEGRATION_KEY, conversations carry no key to it.
-const foundation = new Foundation({ url: process.env.FOUNDATION_URL, integrationKey: process.env.FOUNDATION_INTEGRATION_KEY, webhookSecret: process.env.FOUNDATION_WEBHOOK_SECRET });
-const sessions = new UserSessions({
-  client, model,
-  store: new SupabaseSessionStore(database),
-  foundation, keys: new SupabaseFoundationKeyStore(database),
-});
+const foundation = new Foundation({ url: process.env.FOUNDATION_URL, integrationKey: process.env.FOUNDATION_INTEGRATION_KEY,
+  webhookSecret: process.env.FOUNDATION_WEBHOOK_SECRET, keys: new SupabaseFoundationKeyStore(database) });
+// What a user's agent is given beyond the caller's own tools, whoever carries the request.
+const tools = foundation.enabled ? [foundation] : [];
+const sessions = new UserSessions({ client, model, store: new SupabaseSessionStore(database), tools });
 const billing = new Billing(database);
 const server = createServer({
-  responses: new UserResponses({ ...responseConfiguration(process.env), store: new SupabaseResponseStore(database), billing, foundation, keys: new SupabaseFoundationKeyStore(database) }),
+  responses: new UserResponses({ ...responseConfiguration(process.env), store: new SupabaseResponseStore(database), billing, tools }),
   sessions, billing, authenticate: createAuthenticator({ auth: verifier.auth, url }), foundation,
   publicConfig: { supabase: { url, publishableKey }, session: sessions.defaults },
 });

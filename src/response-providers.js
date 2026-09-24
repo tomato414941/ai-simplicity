@@ -1,11 +1,28 @@
 import OpenAI from "openai";
 import { AnthropicResponses } from "./anthropic-responses.js";
 import { unsupported } from "./responses-format.js";
+import { instructionsFor } from "./tools.js";
 
 const OPTIONS = { maxRetries: 0, timeout: 600_000 };
 
 export class NativeResponses {
   constructor(client, managed) { this.api = client.responses; this.managed = managed; }
+
+  // Granted rows in this API's spelling. Only the managed provider carries hosted MCP; elsewhere the row,
+  // and the instructions that go with it, are dropped.
+  carry(params, granted) {
+    const kept = granted.filter((row) => row.kind === "mcp" && this.managed);
+    if (!kept.length) return params;
+    const tools = kept.map((row) => ({ type: "mcp", server_label: row.label, server_url: row.url, authorization: "Bearer " + row.token, require_approval: "never",
+      ...(row.description ? { server_description: row.description } : {}) }));
+    return { ...params, tools: [...(params.tools ?? []), ...tools], instructions: (params.instructions ?? "") + instructionsFor(kept) };
+  }
+
+  // A response echoes its tools. A connection's authorization must not come back with it.
+  redact(value) {
+    if (!Array.isArray(value?.tools)) return value;
+    return { ...value, tools: value.tools.map((tool) => tool?.type === "mcp" ? Object.fromEntries(Object.entries(tool).filter(([name]) => !["authorization", "headers"].includes(name))) : tool) };
+  }
 
   create(body, options) {
     if (!this.managed) {

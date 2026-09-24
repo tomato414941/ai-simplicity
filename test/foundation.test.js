@@ -36,7 +36,8 @@ test("creating a conversation gives it a key to the user's Foundation account ov
   const keys = new Map([["user", "key-old"]]), created = [];
   const client = { beta: { agents: { sessions: { create: async (body) => { created.push(body); return session(); } } } } };
   const store = { read: async () => null, write: async () => {} };
-  const sessions = new UserSessions({ client, model: "gpt-6-astra", store, foundation, keys: { read: async (id) => keys.get(id) ?? null, write: async (id, keyId) => keys.set(id, keyId) } });
+  foundation.keys = { read: async (id) => keys.get(id) ?? null, write: async (id, keyId) => keys.set(id, keyId) };
+  const sessions = new UserSessions({ client, model: "gpt-6-astra", store, tools: [foundation] });
   await sessions.create("user", sessions.defaults);
   assert.deepEqual(calls.map((call) => [call.method, call.path]), [["PUT", "/v1/integration/accounts/user"], ["POST", "/v1/integration/accounts/user/keys"]]);
   assert.equal(calls[1].body.replaces, "key-old", "the previous conversation's key is revoked with the new one");
@@ -51,7 +52,8 @@ test("creating a conversation gives it a key to the user's Foundation account ov
 test("a conversation that cannot be created leaves no live key behind", async (t) => {
   const { calls, foundation } = await fakeFoundation(t);
   const client = { beta: { agents: { sessions: { create: async () => { throw Object.assign(new Error("upstream"), { status: 503 }); } } } } };
-  const sessions = new UserSessions({ client, model: "gpt-6-astra", store: { read: async () => null, write: async () => {} }, foundation, keys: { read: async () => null, write: async () => { throw new Error("must not be reached"); } } });
+  foundation.keys = { read: async () => null, write: async () => { throw new Error("must not be reached"); } };
+  const sessions = new UserSessions({ client, model: "gpt-6-astra", store: { read: async () => null, write: async () => {} }, tools: [foundation] });
   await assert.rejects(sessions.create("user", sessions.defaults));
   assert.equal(calls.at(-1).method, "DELETE"); assert.match(calls.at(-1).path, /\/keys\/key-2$/);
 });
@@ -59,7 +61,7 @@ test("a conversation that cannot be created leaves no live key behind", async (t
 test("without Foundation configured, conversations are created exactly as before", async () => {
   const created = [];
   const client = { beta: { agents: { sessions: { create: async (body) => { created.push(body); return session(); } } } } };
-  const sessions = new UserSessions({ client, model: "gpt-6-astra", store: { read: async () => null, write: async () => {} }, foundation: new Foundation({}), keys: null });
+  const sessions = new UserSessions({ client, model: "gpt-6-astra", store: { read: async () => null, write: async () => {} } });
   await sessions.create("user", sessions.defaults);
   assert.deepEqual(created[0].agent.tools, [{ type: "web_search", mode: "live" }]);
   assert.doesNotMatch(created[0].agent.instructions, /foundation/i);
@@ -123,4 +125,24 @@ test("a Responses request to another provider carries no Foundation connection",
   await authFetch(base + "/v1/responses", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: routed.id, input: "hi" }) });
   assert.equal((requests.at(-1).body.tools ?? []).some((item) => item.type === "mcp"), false);
   assert.equal(calls.length, 0);
+});
+
+test("a source's grant is spelled by whichever provider carries it, and a provider that cannot carry it drops the instructions with it", async () => {
+  const { grant } = await import("../src/tools.js");
+  const { NativeResponses } = await import("../src/response-providers.js");
+  const { AnthropicResponses } = await import("../src/anthropic-responses.js");
+  const { carry: agents } = await import("../src/agent-session.js");
+  const kept = [];
+  const source = { grant: async (userId) => ({ tools: [{ kind: "mcp", label: "vault", url: "https://vault.test/mcp", token: "fdn_t", instructions: "\nUse vault." }], keep: async () => kept.push(userId) }) };
+  const granted = await grant([source], "user");
+  const params = { model: "m", instructions: "Be brief.", tools: [{ type: "web_search" }] };
+  const managed = new NativeResponses({ responses: {} }, true).carry(params, granted.tools);
+  assert.deepEqual(managed.tools.at(-1), { type: "mcp", server_label: "vault", server_url: "https://vault.test/mcp", authorization: "Bearer fdn_t", require_approval: "never" });
+  assert.equal(managed.instructions, "Be brief.\nUse vault.");
+  assert.deepEqual(new NativeResponses({ responses: {} }, false).carry(params, granted.tools), params);
+  assert.deepEqual(new AnthropicResponses({ apiKey: "k" }).carry(params, granted.tools), params);
+  assert.deepEqual(agents([{ kind: "web_search" }, ...granted.tools]), { tools: [{ type: "web_search", mode: "live" }, { type: "mcp", server_label: "vault", transport: { type: "http", server_url: "https://vault.test/mcp", authorization: "Bearer fdn_t" } }], instructions: "\nUse vault." });
+  await granted.keep();
+  assert.deepEqual(kept, ["user"]);
+  assert.deepEqual(await grant([], "user").then((empty) => empty.tools), []);
 });

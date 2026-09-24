@@ -1,18 +1,13 @@
-import { AgentSession, INSTRUCTIONS, OPTIONS } from "./agent-session.js";
-
-// Added when the conversation carries a Foundation key. Foundation's own guide says the rest.
-const FOUNDATION_INSTRUCTIONS = `
-The foundation MCP tools reach this person's Foundation account: keys, secrets and connections they keep for you.
-Call foundation_guide before using it, and follow its rules. Never ask the person to paste a secret into the chat.`;
+import { AgentSession, INSTRUCTIONS, OPTIONS, carry } from "./agent-session.js";
+import { grant } from "./tools.js";
 
 export class UserSessions {
-  constructor({ client, store, model, foundation = null, keys = null }) {
+  constructor({ client, store, model, tools = [] }) {
     this.client = client;
     this.store = store;
     this.model = model;
-    // Foundation, when configured: each conversation carries a key to its user's own account there, over MCP.
-    this.foundation = foundation?.enabled ? foundation : null;
-    this.keys = keys;
+    // Sources of what a user's conversation is given beyond the fixed policy (Foundation, when configured).
+    this.tools = tools;
     this.creating = new Set();
     this.defaults = { agent: { model }, environment: { type: "openai_hosted" } };
   }
@@ -42,24 +37,22 @@ export class UserSessions {
     this.creating.add(userId);
     try {
       if (await this.store.read(userId)) throw failure(409, "A conversation already exists.");
-      // A key for this conversation, replacing the one an earlier conversation of this user carried.
-      const key = this.foundation ? await this.foundation.issueKey(userId, await this.keys.read(userId)) : null;
+      // What this conversation is given: web search always, and whatever its user's sources grant.
+      const granted = await grant(this.tools, userId);
+      const { tools, instructions } = carry([{ kind: "web_search" }, ...granted.tools]);
       let session;
       try {
         // Complete ownership persistence even if the viewer disconnects. A read
         // on reconnect discovers the session; creation is never automatically retried.
         session = await this.client.beta.agents.sessions.create({
-          agent: {
-            model: this.model, instructions: INSTRUCTIONS + (key ? FOUNDATION_INSTRUCTIONS : ""),
-            tools: [{ type: "web_search", mode: "live" }, ...(key ? [this.foundation.mcpTool(key.token)] : [])], multi_agent: { enabled: false },
-          },
+          agent: { model: this.model, instructions: INSTRUCTIONS + instructions, tools, multi_agent: { enabled: false } },
           environment: { type: "openai_hosted", network: { access: "enabled" } },
         }, OPTIONS);
       } catch (error) {
-        if (key) await this.foundation.revokeKey(userId, key.id).catch(() => {});
+        await granted.drop();
         throw error;
       }
-      if (key) await this.keys.write(userId, key.id);
+      await granted.keep();
       await this.store.write(userId, session.id);
       return session;
     } finally { this.creating.delete(userId); }

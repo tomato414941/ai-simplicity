@@ -2,12 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { readEvents } from "../shared/agent-session.js";
 import { eventStream, invalid, unsupported, upstreamFailure, responseId, responseHeaders } from "./responses-format.js";
-import { Foundation } from "./foundation.js";
-
-// Added when the request carries this person's Foundation connection. Foundation's own guide says the rest.
-const FOUNDATION_INSTRUCTIONS = `
-The foundation MCP tools reach this person's Foundation account: keys, secrets and connections they keep for you.
-Call foundation_guide before using it, and follow its rules. Never ask the person to paste a secret into the chat.`;
+import { grant } from "./tools.js";
 
 const TERMINAL = ["completed", "incomplete", "failed", "cancelled"];
 const CREATE_FIELDS = ["model", "input", "instructions", "previous_response_id", "background", "store", "stream", "stream_options",
@@ -17,10 +12,10 @@ const CREATE_FIELDS = ["model", "input", "instructions", "previous_response_id",
 // One public Responses contract. Routing belongs to each response, not to a
 // mutable process-wide default. The Agents session implementation is separate.
 export class UserResponses {
-  constructor({ models, providers, store, billing, foundation = null, keys = null }) {
+  constructor({ models, providers, store, billing, tools = [] }) {
     this.models = models; this.providers = providers; this.store = store; this.billing = billing;
-    // Foundation, when configured: each request to a managed OpenAI model carries this user's connection to it.
-    this.foundation = foundation?.enabled ? foundation : null; this.keys = keys;
+    // Sources of what a user's agent is given beyond the caller's own tools (Foundation, when configured).
+    this.tools = tools;
   }
 
   listModels() {
@@ -42,12 +37,11 @@ export class UserResponses {
 
   async create(userId, body, key, options) {
     const context = await this.prepare(userId, body, CREATE_FIELDS, options);
-    // Only a generation reaches Foundation; counting tokens or compacting does not. The connection is ours to add
-    // and only the managed OpenAI provider carries hosted MCP as configured here.
-    if (this.foundation && context.route.provider === "openai") {
-      const tool = this.foundation.responsesTool(await this.foundation.keyFor(userId, this.keys));
-      context.params = { ...context.params, tools: [...(context.params.tools ?? []), tool], instructions: (context.params.instructions ?? "") + FOUNDATION_INSTRUCTIONS };
-    }
+    // Only a generation is given the user's granted tools; counting tokens or compacting is not. The provider
+    // spells them its own way, and drops what it cannot carry.
+    const granted = await grant(this.tools, userId);
+    context.params = context.provider.carry(context.params, granted.tools);
+    await granted.keep();
     const headers = {};
     if (key !== undefined) {
       if (typeof key !== "string" || !/^[\x21-\x7e]{1,256}$/.test(key)) throw invalid("Invalid Idempotency-Key header.", "Idempotency-Key");
@@ -179,7 +173,7 @@ export class UserResponses {
     const id = responseId(context.route.provider, value);
     if (context.record && id !== context.record.id) throw upstreamFailure();
     if (!Number.isFinite(value.created_at) || !Array.isArray(value.output)) throw upstreamFailure();
-    return Foundation.redact({ ...value, id, model: context.body.model, previous_response_id: context.body.previous_response_id ?? null, store: context.body.store !== false });
+    return this.provider(context.route.provider).redact({ ...value, id, model: context.body.model, previous_response_id: context.body.previous_response_id ?? null, store: context.body.store !== false });
   }
 
   async register(userId, context, value) {

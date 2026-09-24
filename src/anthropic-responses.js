@@ -9,6 +9,10 @@ export class AnthropicResponses {
     this.apiKey = apiKey; this.workspace = workspace; this.fetch = fetchImpl; this.managed = false;
   }
 
+  // Granted rows are not carried here yet: no hosted MCP, so nothing to redact either.
+  carry(params) { return params; }
+  redact(value) { return value; }
+
   async request(path, body, options) {
     const upstream = await this.fetch("https://api.anthropic.com/v1/messages" + path, {
       method: "POST", headers: { "x-api-key": this.apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json",

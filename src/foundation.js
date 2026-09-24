@@ -3,40 +3,43 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 // Foundation holds, for each of our users, what their agent needs but must not carry: keys, secrets,
 // connections. We hold one integration credential; it makes accounts and their keys and hands a user
 // to one request through a single-use link. It never reaches what an account keeps.
+//
+// This is the relationship only. How the agent's connection is spelled for a model provider is that
+// provider's business (see tools.js); Foundation grants one row and knows no provider.
 const KEY_NAME = "ai-simplicity";
 
+const INSTRUCTIONS = `
+The foundation MCP tools reach this person's Foundation account: keys, secrets and connections they keep for you.
+Call foundation_guide before using it, and follow its rules. Never ask the person to paste a secret into the chat.`;
+
 export class Foundation {
-  constructor({ url, integrationKey, webhookSecret, fetch: fetchImpl = globalThis.fetch } = {}) {
+  constructor({ url, integrationKey, webhookSecret, keys = null, fetch: fetchImpl = globalThis.fetch } = {}) {
     this.url = url ? new URL(url).origin : null;
     this.integrationKey = integrationKey ?? null;
     this.webhookSecret = webhookSecret ?? null;
-    this.fetch = fetchImpl;
-    // The key each user's requests carry, held only in memory. After a restart a new one is issued, and the
-    // previous one (its ID is all that is stored) is revoked with it.
+    // Which key each user carries, by ID only. The secret itself lives in Foundation's hash and, in memory
+    // here, for as long as this process runs. After a restart a new one is issued, and the previous one
+    // (its ID is all that is stored) is revoked with it.
+    this.keys = keys;
     this.cache = new Map();
-  }
-
-  async keyFor(userId, keys) {
-    if (this.cache.has(userId)) return this.cache.get(userId);
-    const key = await this.issueKey(userId, await keys.read(userId));
-    await keys.write(userId, key.id);
-    this.cache.set(userId, key.token);
-    return key.token;
-  }
-
-  // For the Responses API: the same MCP connection, as that API spells it.
-  responsesTool(key) {
-    return { type: "mcp", server_label: "foundation", server_url: this.url + "/mcp", authorization: "Bearer " + key, require_approval: "never",
-      server_description: "This person's Foundation account: keys, secrets and connections they keep for you. Call foundation_guide first." };
-  }
-
-  // A response echoes its tools. The connection's authorization must not come back with it.
-  static redact(value) {
-    if (!Array.isArray(value?.tools)) return value;
-    return { ...value, tools: value.tools.map((tool) => tool?.type === "mcp" ? Object.fromEntries(Object.entries(tool).filter(([name]) => !["authorization", "headers"].includes(name))) : tool) };
+    this.fetch = fetchImpl;
   }
 
   get enabled() { return Boolean(this.url && this.integrationKey); }
+
+  // The one row this source grants: the agent's MCP connection to this user's account, carrying a key
+  // that is kept once the request it was made for is in place, or revoked if that failed.
+  async grant(userId) {
+    const row = (token) => ({ kind: "mcp", label: "foundation", url: this.url + "/mcp", token, instructions: INSTRUCTIONS,
+      description: "This person's Foundation account: keys, secrets and connections they keep for you. Call foundation_guide first." });
+    if (this.cache.has(userId)) return { tools: [row(this.cache.get(userId))] };
+    const key = await this.issueKey(userId, await this.keys.read(userId));
+    return {
+      tools: [row(key.token)],
+      keep: async () => { await this.keys.write(userId, key.id); this.cache.set(userId, key.token); },
+      drop: () => this.revokeKey(userId, key.id),
+    };
+  }
 
   async call(method, path, body) {
     const response = await this.fetch(this.url + path, {
@@ -50,8 +53,8 @@ export class Foundation {
     return data;
   }
 
-  // The user's account (made on first use), and a fresh key for the conversation being created. The key
-  // it replaces is revoked in the same call, so a rebuilt conversation never leaves an old key alive.
+  // The user's account (made on first use), and a fresh key. The key it replaces is revoked in the same
+  // call, so a rebuilt conversation never leaves an old key alive.
   async issueKey(userId, replaces) {
     await this.call("PUT", "/v1/integration/accounts/" + encodeURIComponent(userId), {});
     const { key } = await this.call("POST", "/v1/integration/accounts/" + encodeURIComponent(userId) + "/keys", { name: KEY_NAME, ...(replaces ? { replaces } : {}) });
@@ -60,12 +63,6 @@ export class Foundation {
 
   async revokeKey(userId, keyId) {
     await this.call("DELETE", "/v1/integration/accounts/" + encodeURIComponent(userId) + "/keys/" + encodeURIComponent(keyId), {});
-  }
-
-  // The agent reaches Foundation through MCP, whatever it runs on: the key travels in the connection,
-  // never through the agent. A shell, when there is one, is an addition, not a requirement.
-  mcpTool(key) {
-    return { type: "mcp", server_label: "foundation", transport: { type: "http", server_url: this.url + "/mcp", authorization: "Bearer " + key } };
   }
 
   // A single-use link to one of this user's requests, made only after we checked who is asking.
@@ -87,8 +84,6 @@ export class Foundation {
   }
 }
 
-// Which Foundation key each user's conversation carries, by ID only. The secret itself lives in the
-// conversation's configuration at OpenAI and in Foundation's hash; we keep neither.
 export class SupabaseFoundationKeyStore {
   constructor(client) { this.client = client; }
   async read(userId) {

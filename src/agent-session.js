@@ -1,3 +1,5 @@
+import { instructionsFor } from "./tools.js";
+
 export const INSTRUCTIONS = `You are the intelligence behind one simple, continuous conversation.
 Be warm, direct, and genuinely useful. Respond in the language the person uses unless they ask otherwise.
 The person never needs to organize chats, choose a model, or understand internal AI machinery.
@@ -10,6 +12,13 @@ Never send private conversation data or credentials to an external website or AP
 When an action has consequences or requires missing information, make that clear and preserve the person's control.`;
 
 export const OPTIONS = { maxRetries: 0, timeout: 8_000 };
+
+// Granted rows in the Agents API's spelling, with the instructions that travel with them.
+export function carry(granted) {
+  const tools = granted.map((row) => row.kind === "web_search" ? { type: "web_search", mode: "live" }
+    : row.kind === "mcp" ? { type: "mcp", server_label: row.label, transport: { type: "http", server_url: row.url, authorization: "Bearer " + row.token } } : null).filter(Boolean);
+  return { tools, instructions: instructionsFor(granted) };
+}
 
 export class AgentSession {
   constructor({ client, id }) {
