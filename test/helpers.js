@@ -76,7 +76,7 @@ export async function app(t, handler, options = {}) {
       responseOwners.set(id, userId);
     },
   } });
-  const server = createServer({ sessions, responses, billing, authenticate, publicConfig, logger: { error: (value) => logs.push(value) } });
+  const server = createServer({ sessions, responses, billing, authenticate, publicConfig, foundation: options.foundation ?? null, logger: { error: (value) => logs.push(value), log: () => {} } });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
   return { base: `http://127.0.0.1:${server.address().port}`, requests, logs, server, ownership, responseOwners };

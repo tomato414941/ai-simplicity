@@ -74,7 +74,25 @@ window.addEventListener("online", () => { if (!connected) { unavailableSince = n
 window.addEventListener("offline", () => recover(connection));
 
 await start();
+await arriveFromFoundation();
 if (!window.matchMedia("(pointer: coarse)").matches) input.focus();
+
+// Foundation sends this person here to open one of their requests (foundation_request), and back here when it is
+// done (foundation_status). Opening it asks our server for a single-use link, made only once we know who they are.
+async function arriveFromFoundation() {
+  const here = globalThis.location;
+  if (!here || here.pathname !== "/foundation") return;
+  const query = new URLSearchParams(here.search), requestId = query.get("foundation_request"), status = query.get("foundation_status");
+  globalThis.history?.replaceState(null, "", "/");
+  if (!requestId || !identity) return;
+  if (status) { notice = status === "done" ? "登録しました。会話を続けられます。" : "登録しませんでした。"; render(); return; }
+  try {
+    const { url } = await jsonRequest("/api/foundation/links", { method: "POST", body: JSON.stringify({ request_id: requestId }) });
+    here.assign(url);
+  } catch {
+    notice = "この依頼は開けませんでした。AIにもう一度お願いしてください。"; render();
+  }
+}
 
 async function start() {
   if (initializing) return;

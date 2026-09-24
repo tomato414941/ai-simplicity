@@ -1,0 +1,94 @@
+import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
+import { createServer } from "node:http";
+import { test } from "node:test";
+import { Foundation } from "../src/foundation.js";
+import { UserSessions } from "../src/user-sessions.js";
+import { app, authFetch, session, USER_A } from "./helpers.js";
+
+// Foundation, played by a local server: it remembers what it was asked and answers as the real one does.
+async function fakeFoundation(t) {
+  const calls = [];
+  const server = createServer(async (request, response) => {
+    let body = ""; for await (const chunk of request) body += chunk;
+    calls.push({ method: request.method, path: request.url, authorization: request.headers.authorization, body: body ? JSON.parse(body) : null });
+    const reply = (status, data) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(data)); };
+    if (request.headers.authorization !== "Bearer fdni_test") return reply(401, { error: { code: "not_an_integration" } });
+    if (request.method === "PUT" && /^\/v1\/integration\/accounts\/[^/]+$/.test(request.url)) return reply(200, { account: { id: "acct-1" } });
+    if (request.method === "POST" && request.url.endsWith("/keys")) return reply(201, { key: { id: "key-" + calls.length, name: "ai-simplicity", token: "fdn_" + "x".repeat(43) } });
+    if (request.method === "DELETE" && request.url.includes("/keys/")) return reply(200, { ok: true });
+    if (request.method === "POST" && request.url === "/v1/integration/links") {
+      const { request_id, external_id } = calls.at(-1).body;
+      if (external_id !== USER_A) return reply(404, { error: { code: "not_found" } });
+      return reply(201, { url: "http://foundation.test/requests/" + request_id + "#link=abc" });
+    }
+    reply(404, { error: { code: "not_found" } });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}`;
+  return { calls, url, foundation: new Foundation({ url, integrationKey: "fdni_test", webhookSecret: "whsec_test" }) };
+}
+const requestId = "A".repeat(43);
+
+test("creating a conversation gives it a key to the user's Foundation account over MCP, replacing the previous one", async (t) => {
+  const { calls, foundation, url } = await fakeFoundation(t);
+  const keys = new Map([["user", "key-old"]]), created = [];
+  const client = { beta: { agents: { sessions: { create: async (body) => { created.push(body); return session(); } } } } };
+  const store = { read: async () => null, write: async () => {} };
+  const sessions = new UserSessions({ client, model: "gpt-6-astra", store, foundation, keys: { read: async (id) => keys.get(id) ?? null, write: async (id, keyId) => keys.set(id, keyId) } });
+  await sessions.create("user", sessions.defaults);
+  assert.deepEqual(calls.map((call) => [call.method, call.path]), [["PUT", "/v1/integration/accounts/user"], ["POST", "/v1/integration/accounts/user/keys"]]);
+  assert.equal(calls[1].body.replaces, "key-old", "the previous conversation's key is revoked with the new one");
+  const tool = created[0].agent.tools.find((item) => item.type === "mcp");
+  assert.equal(tool.transport.server_url, url + "/mcp");
+  assert.match(tool.transport.authorization, /^Bearer fdn_/);
+  assert.match(created[0].agent.instructions, /foundation_guide/);
+  assert.equal(keys.get("user"), "key-2", "only the key's id is kept here");
+  assert.doesNotMatch(JSON.stringify([...keys]), /fdn_/);
+});
+
+test("a conversation that cannot be created leaves no live key behind", async (t) => {
+  const { calls, foundation } = await fakeFoundation(t);
+  const client = { beta: { agents: { sessions: { create: async () => { throw Object.assign(new Error("upstream"), { status: 503 }); } } } } };
+  const sessions = new UserSessions({ client, model: "gpt-6-astra", store: { read: async () => null, write: async () => {} }, foundation, keys: { read: async () => null, write: async () => { throw new Error("must not be reached"); } } });
+  await assert.rejects(sessions.create("user", sessions.defaults));
+  assert.equal(calls.at(-1).method, "DELETE"); assert.match(calls.at(-1).path, /\/keys\/key-2$/);
+});
+
+test("without Foundation configured, conversations are created exactly as before", async () => {
+  const created = [];
+  const client = { beta: { agents: { sessions: { create: async (body) => { created.push(body); return session(); } } } } };
+  const sessions = new UserSessions({ client, model: "gpt-6-astra", store: { read: async () => null, write: async () => {} }, foundation: new Foundation({}), keys: null });
+  await sessions.create("user", sessions.defaults);
+  assert.deepEqual(created[0].agent.tools, [{ type: "web_search", mode: "live" }]);
+  assert.doesNotMatch(created[0].agent.instructions, /foundation/i);
+});
+
+test("opening a request asks Foundation for a single-use link in this user's name; a signed notice is accepted and a forged one is not", async (t) => {
+  const { calls, foundation } = await fakeFoundation(t);
+  const { base } = await app(t, async () => { throw new Error("no upstream call expected"); }, { foundation });
+  const linked = await authFetch(base + "/api/foundation/links", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request_id: requestId }) });
+  const answer = await linked.text();
+  assert.equal(linked.status, 200, answer);
+  assert.equal(JSON.parse(answer).url, "http://foundation.test/requests/" + requestId + "#link=abc");
+  assert.deepEqual(calls.at(-1).body, { request_id: requestId, external_id: USER_A });
+  const other = await fetch(base + "/api/foundation/links", { method: "POST", headers: { Authorization: "Bearer user-b", "content-type": "application/json" }, body: JSON.stringify({ request_id: requestId }) });
+  assert.equal(other.status, 404, "Foundation refuses a request that is not that user's, and so do we");
+  assert.equal((await fetch(base + "/api/foundation/links", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
+  assert.equal((await authFetch(base + "/api/foundation/links", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request_id: "../x" }) })).status, 404);
+  const body = JSON.stringify({ id: "evt_1", type: "request.done", created: 1, account: USER_A, data: {} });
+  const at = Math.floor(Date.now() / 1000);
+  const signature = `t=${at},v1=${createHmac("sha256", "whsec_test").update(at + "." + body).digest("hex")}`;
+  assert.equal((await fetch(base + "/api/foundation/events", { method: "POST", headers: { "content-type": "application/json", "foundation-signature": signature }, body })).status, 204);
+  assert.equal((await fetch(base + "/api/foundation/events", { method: "POST", headers: { "content-type": "application/json", "foundation-signature": signature }, body: body + " " })).status, 401);
+  assert.equal((await fetch(base + "/api/foundation/events", { method: "POST", headers: { "content-type": "application/json" }, body })).status, 401);
+  const stale = at - 600;
+  assert.equal((await fetch(base + "/api/foundation/events", { method: "POST", headers: { "content-type": "application/json", "foundation-signature": `t=${stale},v1=${createHmac("sha256", "whsec_test").update(stale + "." + body).digest("hex")}` }, body })).status, 401);
+});
+
+test("the Foundation page is served, and the links route is absent when Foundation is not configured", async (t) => {
+  const { base } = await app(t, async () => { throw new Error("no upstream call expected"); });
+  assert.equal((await fetch(base + "/foundation?foundation_request=" + requestId)).status, 200);
+  assert.equal((await authFetch(base + "/api/foundation/links", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ request_id: requestId }) })).status, 404);
+});

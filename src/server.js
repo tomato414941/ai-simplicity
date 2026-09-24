@@ -6,12 +6,13 @@ const MAX_BODY_BYTES = 128 * 1024;
 const PREFIX = "/v1/agents/sessions";
 const PUBLIC_ASSETS = new Map([
   ["/", ["index.html", "text/html"]],
+  ["/foundation", ["index.html", "text/html"]],
   ["/index.html", ["index.html", "text/html"]],
   ["/app.js", ["app.js", "text/javascript"]],
   ["/styles.css", ["styles.css", "text/css"]],
 ]);
 
-export function createServer({ sessions, responses, billing, authenticate, publicConfig, logger = console }) {
+export function createServer({ sessions, responses, billing, authenticate, publicConfig, foundation = null, logger = console }) {
   if (!sessions || !responses || !billing || typeof authenticate !== "function") throw new Error("Authentication, user-scoped sessions, responses and billing are required.");
   return createHttpServer(async (request, response) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
@@ -26,9 +27,18 @@ export function createServer({ sessions, responses, billing, authenticate, publi
       if (method === "GET" && url.pathname === "/api/health") return sendJson(response, 200, { ok: true });
       if (method === "GET" && url.pathname === "/api/config") return sendJson(response, 200, publicConfig);
 
+      // Foundation tells us, signed, when one of our users' requests finished. Nothing else arrives here.
+      if (method === "POST" && url.pathname === "/api/foundation/events") {
+        const raw = await readRaw(request);
+        if (!foundation?.verify(request.headers["foundation-signature"], raw)) throw Object.assign(invalid("Bad signature."), { status: 401 });
+        const event = JSON.parse(raw);
+        logger.log?.(`foundation ${event.type} for ${event.account}`);
+        response.writeHead(204); return response.end();
+      }
+      const isFoundation = url.pathname === "/api/foundation/links";
       const isBilling = url.pathname === "/api/billing" || url.pathname.startsWith("/api/billing/");
       const isResponses = url.pathname === "/v1/responses" || url.pathname.startsWith("/v1/responses/");
-      const user = (isBilling || isResponses || url.pathname === PREFIX || url.pathname.startsWith(PREFIX + "/")) ? await authenticate(request) : null;
+      const user = (isFoundation || isBilling || isResponses || url.pathname === PREFIX || url.pathname.startsWith(PREFIX + "/")) ? await authenticate(request) : null;
       if (user && ["POST", "DELETE"].includes(method) && request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) {
         throw Object.assign(invalid("Origin is not allowed."), { status: 403 });
       }
@@ -60,6 +70,16 @@ export function createServer({ sessions, responses, billing, authenticate, publi
         return await relayResponse(upstream, response, options);
       }
 
+      // This user opens one of their Foundation requests: a single-use link, made only once we know who they are.
+      if (isFoundation) {
+        if (method !== "POST") throw notFound();
+        if (!foundation?.enabled) throw notFound();
+        noQuery(url);
+        const body = await readJson(request);
+        fields(body, ["request_id"], null);
+        if (typeof body.request_id !== "string") throw invalid("request_id is required.", "request_id");
+        return sendJson(response, 200, { url: await foundation.link(user.id, body.request_id) });
+      }
       if (method === "GET" && url.pathname === "/api/billing") {
         noQuery(url);
         return sendJson(response, 200, { ...await billing.balance(user.id, options), pricing_status: "unconfigured" });
@@ -251,6 +271,18 @@ function validateEvents(body) {
     }
   }
   if (characters > 20_000) throw invalid("Input must not exceed 20000 characters.", "input");
+}
+
+// The body as sent, for a signature that covers its exact bytes.
+async function readRaw(request) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) throw Object.assign(invalid("Request body is too large."), { status: 413 });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 async function readJson(request) {
