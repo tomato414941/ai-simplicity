@@ -38,9 +38,15 @@ export function createServer({ sessions, responses, billing, authenticate, publi
       const isFoundation = url.pathname === "/api/foundation/links";
       const isBilling = url.pathname === "/api/billing" || url.pathname.startsWith("/api/billing/");
       const isResponses = url.pathname === "/v1/responses" || url.pathname.startsWith("/v1/responses/");
-      const user = (isFoundation || isBilling || isResponses || url.pathname === PREFIX || url.pathname.startsWith(PREFIX + "/")) ? await authenticate(request) : null;
+      const isModels = url.pathname === "/v1/models";
+      const user = (isFoundation || isBilling || isResponses || isModels || url.pathname === PREFIX || url.pathname.startsWith(PREFIX + "/")) ? await authenticate(request) : null;
       if (user && ["POST", "DELETE"].includes(method) && request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) {
         throw Object.assign(invalid("Origin is not allowed."), { status: 403 });
+      }
+
+      if (isModels && method === "GET") {
+        noQuery(url);
+        return sendJson(response, 200, responses.listModels());
       }
 
       if (isResponses) {

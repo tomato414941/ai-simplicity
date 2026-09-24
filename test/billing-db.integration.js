@@ -56,7 +56,7 @@ before(async () => {
     create schema auth; create table auth.users (id uuid primary key);
     alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
     alter default privileges in schema public grant all on functions to anon, authenticated, service_role;`, "postgres");
-  for (const name of ["202609140001_agent_sessions.sql", "202609210001_billing.sql", "202609240001_responses.sql"]) {
+  for (const name of ["202609140001_agent_sessions.sql", "202609210001_billing.sql", "202609240001_responses.sql", "202609240003_response_providers.sql"]) {
     await sql(await readFile(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"), "postgres");
   }
 }, { timeout: 30_000 });
@@ -65,10 +65,15 @@ after(async () => { if (started) await exec("docker", ["rm", "--force", containe
 
 test("Responseの所有者をサーバーだけが登録し既存の所有者を保護する", async () => {
   const owner = await user("0"), other = await user("0");
-  await sql(`insert into public.responses (id, user_id) values ('resp_test', ${literal(owner)});`);
+  await sql(`insert into public.responses (id, user_id, provider, upstream_id) values ('resp_test', ${literal(owner)}, 'openai', 'resp_test');`);
   assert.equal((await value("select user_id from public.responses where id = 'resp_test'")).user_id, owner);
-  await assert.rejects(sql(`insert into public.responses (id, user_id) values ('resp_test', ${literal(other)});`), /duplicate key/);
+  await assert.rejects(sql(`insert into public.responses (id, user_id, provider, upstream_id) values ('resp_test', ${literal(other)}, 'openai', 'resp_test');`), /duplicate key/);
   await assert.rejects(sql(`update public.responses set user_id = ${literal(other)} where id = 'resp_test';`), /permission denied/);
+  await assert.rejects(sql("update public.responses set provider = 'openrouter' where id = 'resp_test';"), /permission denied/);
+  await assert.rejects(sql("update public.responses set input = '[]'::jsonb where id = 'resp_test';"), /permission denied/);
+  await assert.rejects(sql("update public.responses set response = '{\"object\":\"response\",\"id\":\"resp_foreign\"}'::jsonb where id = 'resp_test';"), /check constraint/);
+  await assert.rejects(sql("update public.responses set response = '{}'::jsonb where id = 'resp_test';"), /check constraint/);
+  await sql("update public.responses set response = '{\"object\":\"response\",\"id\":\"resp_test\",\"status\":\"completed\"}'::jsonb where id = 'resp_test';");
   for (const role of ["anon", "authenticated"]) {
     await assert.rejects(sql("select * from public.responses;", role), /permission denied/);
     await assert.rejects(sql(`insert into public.responses (id, user_id) values ('resp_forged', ${literal(other)});`, role), /permission denied/);
@@ -76,6 +81,25 @@ test("Responseの所有者をサーバーだけが登録し既存の所有者を
   await sql("grant select on public.responses to authenticated;", "postgres");
   assert.equal((await value("select count(*)::int as count from public.responses", "authenticated")).count, 0);
   await sql("revoke select on public.responses from authenticated;", "postgres");
+  await sql("delete from public.responses where id = 'resp_test';");
+  assert.equal((await value("select count(*)::int as count from public.responses")).count, 0);
+});
+
+test("応答の原価を未確定から確定に訂正し再取得時も利用者への二重請求を防ぐ", async () => {
+  const userId = await user("0");
+  const pending = { source: "openrouter", reference: "resp_accounting:requested", user_id: userId, occurred_at: time,
+    attribution: "user", amount: null, currency: "USD", status: "unknown" };
+  const originalId = await billing.recordCost(pending);
+  const usage = { source: "openrouter", reference: "resp_accounting:input_tokens", user_id: userId, occurred_at: time,
+    metric: "input_tokens", unit: "token", quantity: "100", status: "final" };
+  const usageId = await billing.recordUsage(usage);
+  const final = { ...pending, reference: "resp_accounting:final", supersedes_id: originalId, amount: "0.000012345", status: "final" };
+  const finalId = await billing.recordCost(final);
+  assert.equal(await billing.recordCost(pending), originalId);
+  assert.equal(await billing.recordCost(final), finalId);
+  assert.equal(await billing.recordUsage(usage), usageId);
+  assert.equal((await value(`select count(*)::int as count from public.current_billing_costs where user_id = ${literal(userId)}`)).count, 1);
+  assert.equal((await billing.balance(userId)).balance, "0");
 });
 
 test("複数の同時予約に対して利用可能な残高だけを確保する", async () => {

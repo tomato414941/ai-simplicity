@@ -4,6 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 import { SupabaseResponseStore } from "../src/user-responses.js";
+import { readEvents } from "../shared/agent-session.js";
 import { app, page, USER_A, USER_B } from "./helpers.js";
 
 const model = "gpt-6-astra";
@@ -52,10 +53,12 @@ test("公式SDKでResponsesを作成し別端末から本人の応答と入力�
   const raw = await otherDevice.retrieve(created.id, { include: ["reasoning.encrypted_content"] }).asResponse();
   assert.deepEqual(await raw.json(), expected);
   assert.equal(raw.headers.get("x-request-id"), "request_native");
-  assert.deepEqual((await otherDevice.inputItems.list(created.id, { limit: 2, order: "asc", after: "msg_start" })).data, input);
-  assert.equal(requests.at(-1).query.get("limit"), "2");
-  assert.equal(requests.at(-1).query.get("order"), "asc");
-  assert.equal(requests.at(-1).query.get("after"), "msg_start");
+  const first = await otherDevice.inputItems.list(created.id, { limit: 1, order: "asc" });
+  assert.equal(first.data[0].role, "developer");
+  assert.equal(first.has_more, true);
+  const next = await otherDevice.inputItems.list(created.id, { limit: 1, order: "asc", after: first.data[0].id });
+  assert.equal(next.data[0].content[0].text, "今日のニュース");
+  assert.equal(next.has_more, false);
 });
 
 test("本人のprevious_response_idで会話を継続しfunctionの結果を渡す", async (t) => {
@@ -80,7 +83,7 @@ test("他人のResponse IDによる参照・削除・停止・会話継続を拒
   assert.equal(requests.length, 0);
 });
 
-test("SSEを元のバイト列で中継しResponse ID公開前に所有者を保存する", { timeout: 3000 }, async (t) => {
+test("SSEのイベントを逐次返しResponse ID公開前に所有者を保存する", { timeout: 3000 }, async (t) => {
   const opening = ": keepalive\r\n\r\n" + frame({ type: "response.created", sequence_number: 0, response: response({ status: "in_progress", output: [] }) });
   const delta = frame({ type: "response.output_text.delta", sequence_number: 1, item_id: "msg_a", output_index: 0, content_index: 0, delta: "日本語", obfuscation: "xyz" });
   const ending = frame({ type: "response.completed", sequence_number: 2, response: response() }) + "data: [DONE]\r\n\r\n";
@@ -90,8 +93,8 @@ test("SSEを元のバイト列で中継しResponse ID公開前に所有者を保
     // Exercise frames fragmented even within UTF-8 code points.
     for (const byte of new TextEncoder().encode(opening)) controller.enqueue(Uint8Array.of(byte));
   } }), { headers: { "content-type": "text/event-stream" } }), { responseStore: {
-    owns: async (userId, id) => responseOwners.get(id) === userId,
-    save: (userId, id) => new Promise((resolve) => { save = () => { saved = true; responseOwners.set(id, userId); resolve(); }; }),
+    read: async () => null, finish: async () => {},
+    save: (userId, record) => new Promise((resolve) => { save = () => { saved = true; responseOwners.set(record.id, userId); resolve(); }; }),
   } });
   const pending = send(base, "POST", "", { ...creation, stream: true });
   let exposed = false;
@@ -103,14 +106,14 @@ test("SSEを元のバイト列で中継しResponse ID公開前に所有者を保
   const result = await pending;
   assert.equal(saved, true);
   assert.equal(responseOwners.get("resp_a"), USER_A);
-  const reader = result.body.getReader();
-  const first = await reader.read();
-  assert.equal(new TextDecoder().decode(first.value), opening);
+  const events = readEvents(result.body);
+  const first = await events.next();
+  assert.equal(first.value.type, "response.created");
   output.enqueue(new TextEncoder().encode(delta));
-  assert.equal(new TextDecoder().decode((await reader.read()).value), delta);
+  assert.deepEqual((await events.next()).value, { type: "response.output_text.delta", sequence_number: 1, item_id: "msg_a", output_index: 0, content_index: 0, delta: "日本語", obfuscation: "xyz" });
   output.enqueue(new TextEncoder().encode(ending)); output.close();
-  assert.equal(new TextDecoder().decode((await reader.read()).value), ending);
-  assert.equal((await reader.read()).done, true);
+  assert.deepEqual((await events.next()).value.response, response());
+  assert.equal((await events.next()).done, true);
 });
 
 test("公式SDKがResponsesのストリーミングイベントを読み取る", async (t) => {
@@ -184,7 +187,7 @@ test("生成失敗のSSEイベントを成功に置き換えず中継する", as
     const { base } = await app(t, () => streamResponse(text));
     const result = await send(base, "POST", "", { ...creation, stream: true });
     assert.equal(result.status, 200);
-    assert.equal(await result.text(), text);
+    assert.equal(await result.text(), text.replaceAll("\r\n", "\n"));
   }
 });
 
@@ -203,7 +206,7 @@ test("store=falseのストリーミングで受け取ったitemsをクライア�
   const text = frame({ type: "response.created", response: response({ store: false }) }) + frame({ type: "response.completed", response: response({ store: false }) });
   const { base, responseOwners } = await app(t, () => streamResponse(text));
   const result = await send(base, "POST", "", { ...creation, stream: true, store: false });
-  assert.equal(await result.text(), text);
+  assert.equal(await result.text(), text.replaceAll("\r\n", "\n"));
   assert.equal(responseOwners.size, 0);
 });
 
@@ -255,7 +258,7 @@ test("本人の応答を削除し以後の取得で公式の404を返す", async
   await client(base).delete("resp_a");
   assert.equal(deleted, true);
   await assert.rejects(client(base).retrieve("resp_a"), { status: 404, code: "not_found" });
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 1);
 });
 
 test("上流エラーの分類と再試行情報を返し生成を自動再送しない", async (t) => {
@@ -273,7 +276,7 @@ test("上流エラーの分類と再試行情報を返し生成を自動再送�
 test("所有者を保存できない場合は応答を公開せず503を返す", async (t) => {
   for (const stream of [false, true]) {
     const { base } = await app(t, () => stream ? streamResponse(frame({ type: "response.created", response: response() })) : Response.json(response()), {
-      responseStore: { owns: async () => false, save: async () => { throw Object.assign(new Error("Storage down"), { status: 503 }); } },
+      responseStore: { read: async () => null, save: async () => { throw Object.assign(new Error("Storage down"), { status: 503 }); } },
     });
     const result = await send(base, "POST", "", { ...creation, stream });
     assert.equal(result.status, 503);
@@ -283,7 +286,7 @@ test("所有者を保存できない場合は応答を公開せず503を返す",
 
 test("所有者を照合できない場合は取得と会話継続を停止する", async (t) => {
   const { base, requests } = await app(t, () => assert.fail("Ownership verification must succeed first"), {
-    responseStore: { owns: async () => { throw Object.assign(new Error("Storage down"), { status: 503 }); } },
+    responseStore: { read: async () => { throw Object.assign(new Error("Storage down"), { status: 503 }); } },
   });
   await assert.rejects(client(base).retrieve("resp_a"), { status: 503 });
   await assert.rejects(client(base).create({ ...creation, previous_response_id: "resp_a" }), { status: 503 });
@@ -318,21 +321,22 @@ test("不正なクエリと別オリジンからの変更操作を拒否する",
 test("SupabaseでResponse所有者を本人とIDの両方で照合し同じ所有者の保存を再試行する", async () => {
   const requests = [];
   let duplicate = false, found = true;
+  const record = { id: "resp_a", provider: "openai", upstream_id: "resp_a", upstream_model: model, input: [], response: response() };
   const database = createClient("https://auth-test.supabase.co", "sb_secret_test", {
     auth: { persistSession: false, autoRefreshToken: false }, global: { fetch: async (url, options) => {
       requests.push({ url: new URL(url), method: options.method, body: options.body });
       if (options.method === "POST") return duplicate ? Response.json({ code: "23505", message: "duplicate" }, { status: 409 }) : new Response(null, { status: 201 });
-      return Response.json(found ? { id: "resp_a" } : null);
+      return Response.json(found ? record : null);
     } },
   });
   const store = new SupabaseResponseStore(database);
-  assert.equal(await store.owns(USER_A, "resp_a"), true);
+  assert.deepEqual(await store.read(USER_A, "resp_a"), record);
   assert.equal(requests[0].url.searchParams.get("user_id"), `eq.${USER_A}`);
   assert.equal(requests[0].url.searchParams.get("id"), "eq.resp_a");
-  await store.save(USER_A, "resp_a");
-  assert.deepEqual(JSON.parse(requests[1].body), { user_id: USER_A, id: "resp_a" });
+  await store.save(USER_A, record);
+  assert.deepEqual(JSON.parse(requests[1].body), { user_id: USER_A, ...record });
   duplicate = true;
-  await store.save(USER_A, "resp_a");
+  await store.save(USER_A, record);
   found = false;
-  await assert.rejects(store.save(USER_B, "resp_a"), { status: 503 });
+  await assert.rejects(store.save(USER_B, record), { status: 503 });
 });

@@ -5,6 +5,7 @@ import { UserSessions, SupabaseSessionStore } from "./user-sessions.js";
 import { createServer } from "./server.js";
 import { Billing } from "./billing.js";
 import { UserResponses, SupabaseResponseStore } from "./user-responses.js";
+import { responseConfiguration } from "./response-providers.js";
 import { Foundation, SupabaseFoundationKeyStore } from "./foundation.js";
 
 for (const key of ["OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_SECRET_KEY"]) {
@@ -41,9 +42,10 @@ const sessions = new UserSessions({
   store: new SupabaseSessionStore(database),
   foundation, keys: new SupabaseFoundationKeyStore(database),
 });
+const billing = new Billing(database);
 const server = createServer({
-  responses: new UserResponses({ client, model, store: new SupabaseResponseStore(database) }),
-  sessions, billing: new Billing(database), authenticate: createAuthenticator({ auth: verifier.auth, url }), foundation,
+  responses: new UserResponses({ ...responseConfiguration(process.env), store: new SupabaseResponseStore(database), billing }),
+  sessions, billing, authenticate: createAuthenticator({ auth: verifier.auth, url }), foundation,
   publicConfig: { supabase: { url, publishableKey }, session: sessions.defaults },
 });
 

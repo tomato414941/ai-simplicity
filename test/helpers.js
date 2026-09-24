@@ -1,8 +1,10 @@
 import OpenAI from "openai";
+import { randomUUID } from "node:crypto";
 import { createServer } from "../src/server.js";
 import { UserSessions } from "../src/user-sessions.js";
 import { unauthorized } from "../src/auth.js";
 import { UserResponses } from "../src/user-responses.js";
+import { responseConfiguration } from "../src/response-providers.js";
 
 export const USER_A = "11111111-1111-4111-8111-111111111111";
 export const USER_B = "22222222-2222-4222-8222-222222222222";
@@ -38,15 +40,13 @@ export const turnEvent = (fields = {}) => {
 
 export async function app(t, handler, options = {}) {
   const requests = [], logs = [];
-  const client = new OpenAI({
-    apiKey: "test-key", maxRetries: 0,
-    fetch: async (url, options) => {
-      const request = { path: new URL(url).pathname, query: new URL(url).searchParams, method: options.method,
+  const transport = async (url, options) => {
+      const request = { host: new URL(url).host, path: new URL(url).pathname, query: new URL(url).searchParams, method: options.method,
         headers: new Headers(options.headers), body: options.body ? JSON.parse(options.body) : null, signal: options.signal };
       requests.push(request);
       return handler(request);
-    },
-  });
+  };
+  const client = new OpenAI({ apiKey: "test-key", maxRetries: 0, fetch: transport });
   const ownership = options.ownership ?? new Map([[USER_A, "sess_test"]]);
   const sessions = new UserSessions({ client, model: "gpt-6-astra", store: {
     read: async (userId) => ownership.get(userId) ?? null,
@@ -64,20 +64,42 @@ export async function app(t, handler, options = {}) {
     return { id, expiresAt: Date.now() + 60_000 };
   });
   const publicConfig = { supabase: { url: "https://example.supabase.co", publishableKey: "sb_publishable_test" }, session: sessions.defaults };
-  const billing = options.billing ?? {
+  const observations = [], observationIds = new Map();
+  const observe = (kind, record) => {
+    const key = kind + ":" + record.source + ":" + record.reference;
+    if (!observationIds.has(key)) observationIds.set(key, randomUUID());
+    observations.push({ kind, ...record, id: observationIds.get(key) });
+    return observationIds.get(key);
+  };
+  const billing = {
     balance: async () => { throw new Error("Provide a billing fixture for billing requests."); },
     history: async () => { throw new Error("Provide a billing fixture for billing requests."); },
+    recordCost: async (record) => observe("cost", record), recordUsage: async (record) => observe("usage", record),
+    ...options.billing,
   };
   const responseOwners = options.responseOwners ?? new Map();
-  const responses = new UserResponses({ client, model: "gpt-6-astra", store: options.responseStore ?? {
-    owns: async (userId, id) => responseOwners.get(id) === userId,
-    save: async (userId, id) => {
-      if (responseOwners.has(id) && responseOwners.get(id) !== userId) throw Object.assign(new Error("Conflicting owner"), { status: 503 });
-      responseOwners.set(id, userId);
+  const responseRecords = options.responseRecords ?? new Map([...responseOwners].map(([id]) => [id, {
+    id, provider: "openai", upstream_id: id, upstream_model: "gpt-6-astra", input: [], response: { id, object: "response", model: "gpt-6-astra", created_at: 1,
+      status: "completed", output: [], store: true, previous_response_id: null },
+  }]));
+  const configuration = responseConfiguration({ OPENAI_API_KEY: "test-key", OPENROUTER_API_KEY: "router-key", ANTHROPIC_API_KEY: "anthropic-key",
+    ...(options.models ? { RESPONSES_MODELS: JSON.stringify(options.models) } : {}) }, transport);
+  const responses = new UserResponses({ ...configuration, billing, store: options.responseStore ?? {
+    read: async (userId, id) => responseOwners.get(id) === userId ? structuredClone(responseRecords.get(id)) : null,
+    save: async (userId, record) => {
+      if (responseOwners.has(record.id) && responseOwners.get(record.id) !== userId) throw Object.assign(new Error("Conflicting owner"), { status: 503 });
+      responseOwners.set(record.id, userId);
+      if (!responseRecords.has(record.id)) responseRecords.set(record.id, structuredClone(record));
     },
+    finish: async (userId, id, response) => {
+      if (responseOwners.get(id) !== userId) throw new Error("Owner mismatch");
+      const record = responseRecords.get(id);
+      if (!["completed", "incomplete", "cancelled", "failed"].includes(record.response?.status)) record.response = structuredClone(response);
+    },
+    delete: async (userId, id) => { if (responseOwners.get(id) !== userId) throw new Error("Owner mismatch"); responseOwners.delete(id); responseRecords.delete(id); },
   } });
   const server = createServer({ sessions, responses, billing, authenticate, publicConfig, foundation: options.foundation ?? null, logger: { error: (value) => logs.push(value), log: () => {} } });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
-  return { base: `http://127.0.0.1:${server.address().port}`, requests, logs, server, ownership, responseOwners };
+  return { base: `http://127.0.0.1:${server.address().port}`, requests, logs, server, ownership, responseOwners, responseRecords, observations };
 }
