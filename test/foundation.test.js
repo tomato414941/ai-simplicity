@@ -14,14 +14,16 @@ async function fakeFoundation(t) {
     calls.push({ method: request.method, path: request.url, authorization: request.headers.authorization, body: body ? JSON.parse(body) : null });
     const reply = (status, data) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(data)); };
     if (request.headers.authorization !== "Bearer fdni_test") return reply(401, { error: { code: "not_an_integration" } });
-    if (request.method === "PUT" && /^\/v1\/accounts\/[^/]+$/.test(request.url)) return reply(200, { account: { id: "acct-1" } });
-    if (request.method === "POST" && request.url.endsWith("/keys")) return reply(201, { key: { id: "key-" + calls.length, name: "ai-simplicity", token: "fdn_" + "x".repeat(43) } });
-    if (request.method === "DELETE" && request.url.includes("/keys/")) return reply(200, { ok: true });
-    if (request.method === "POST" && request.url === "/v1/request-links") {
-      const { request_id, external_id } = calls.at(-1).body;
-      if (external_id !== USER_A) return reply(404, { error: { code: "not_found" } });
-      return reply(201, { url: "http://foundation.test/requests/" + request_id + "#link=abc" });
+    if (request.method === "POST" && request.url === "/v1/principals") return reply(201, { principal: { id: "p-" + calls.at(-1).body.alias, alias: calls.at(-1).body.alias } });
+    if (request.method === "POST" && request.url.endsWith("/credentials")) {
+      const { kind, request_id } = calls.at(-1).body;
+      if (kind === "link") {
+        if (!request.url.includes("/p-" + USER_A + "/")) return reply(404, { error: { code: "not_found" } });
+        return reply(201, { credential: { id: "link-1", kind: "link" }, url: "http://foundation.test/requests/" + request_id + "#link=abc" });
+      }
+      return reply(201, { credential: { id: "key-" + calls.length, kind: "key" }, token: "fdn_" + "x".repeat(43) });
     }
+    if (request.method === "DELETE" && request.url.includes("/credentials/")) return reply(200, { ok: true });
     reply(404, { error: { code: "not_found" } });
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -39,7 +41,7 @@ test("creating a conversation gives it a key to the user's Foundation account ov
   foundation.keys = { read: async (id) => keys.get(id) ?? null, write: async (id, keyId) => keys.set(id, keyId) };
   const sessions = new UserSessions({ client, model: "gpt-6-astra", store, tools: [foundation] });
   await sessions.create("user", sessions.defaults);
-  assert.deepEqual(calls.map((call) => [call.method, call.path]), [["PUT", "/v1/accounts/user"], ["POST", "/v1/accounts/user/keys"]]);
+  assert.deepEqual(calls.map((call) => [call.method, call.path]), [["POST", "/v1/principals"], ["POST", "/v1/principals/p-user/credentials"]]);
   assert.equal(calls[1].body.replaces, "key-old", "the previous conversation's key is revoked with the new one");
   const tool = created[0].agent.tools.find((item) => item.type === "mcp");
   assert.equal(tool.transport.server_url, url + "/mcp");
@@ -55,7 +57,7 @@ test("a conversation that cannot be created leaves no live key behind", async (t
   foundation.keys = { read: async () => null, write: async () => { throw new Error("must not be reached"); } };
   const sessions = new UserSessions({ client, model: "gpt-6-astra", store: { read: async () => null, write: async () => {} }, tools: [foundation] });
   await assert.rejects(sessions.create("user", sessions.defaults));
-  assert.equal(calls.at(-1).method, "DELETE"); assert.match(calls.at(-1).path, /\/keys\/key-2$/);
+  assert.equal(calls.at(-1).method, "DELETE"); assert.match(calls.at(-1).path, /\/credentials\/key-2$/);
 });
 
 test("without Foundation configured, conversations are created exactly as before", async () => {
@@ -74,7 +76,7 @@ test("opening a request asks Foundation for a single-use link in this user's nam
   const answer = await linked.text();
   assert.equal(linked.status, 200, answer);
   assert.equal(JSON.parse(answer).url, "http://foundation.test/requests/" + requestId + "#link=abc");
-  assert.deepEqual(calls.at(-1).body, { request_id: requestId, external_id: USER_A });
+  assert.deepEqual(calls.at(-1).body, { kind: "link", request_id: requestId }); assert.equal(calls.at(-2).body.alias, USER_A, "the link is made as this user's own principal");
   const other = await fetch(base + "/api/foundation/links", { method: "POST", headers: { Authorization: "Bearer user-b", "content-type": "application/json" }, body: JSON.stringify({ request_id: requestId }) });
   assert.equal(other.status, 404, "Foundation refuses a request that is not that user's, and so do we");
   assert.equal((await fetch(base + "/api/foundation/links", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
@@ -111,8 +113,8 @@ test("a Responses request to the managed OpenAI model carries this user's Founda
   assert.deepEqual(first.tools.find((item) => item.type === "mcp"), { type: "mcp", server_label: "foundation", server_url: url + "/mcp" }, "what comes back is redacted");
   assert.doesNotMatch(JSON.stringify(first), /fdn_/);
   await create();
-  assert.equal(calls.filter((call) => call.path.endsWith("/keys")).length, 1, "one key per user, issued once and reused");
-  assert.equal(calls.find((call) => call.path.endsWith("/keys")).body.replaces, "key-old");
+  assert.equal(calls.filter((call) => call.path.endsWith("/credentials")).length, 1, "one key per user, issued once and reused");
+  assert.equal(calls.find((call) => call.path.endsWith("/credentials")).body.replaces, "key-old");
   assert.equal(foundationKeys.get(USER_A), "key-2");
 });
 

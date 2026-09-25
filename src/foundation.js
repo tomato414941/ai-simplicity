@@ -1,8 +1,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 // Foundation holds, for each of our users, what their agent needs but must not carry: keys, secrets,
-// connections. We hold one integration credential; it makes accounts and their keys and hands a user
-// to one request through a single-use link. It never reaches what an account keeps.
+// connections. We are a principal there with a key of our own; with it we make a principal for each of our
+// users (calling them by their id here), issue them keys, and hand one of them to one request through a
+// single-use link. We never reach what they keep.
 //
 // This is the relationship only. How the agent's connection is spelled for a model provider is that
 // provider's business (see tools.js); Foundation grants one row and knows no provider.
@@ -53,22 +54,29 @@ export class Foundation {
     return data;
   }
 
-  // The user's account (made on first use), and a fresh key. The key it replaces is revoked in the same
-  // call, so a rebuilt conversation never leaves an old key alive.
+  // The user's principal (made on first use, found again by their id), and a fresh key for it. The key it
+  // replaces is revoked in the same call, so a rebuilt conversation never leaves an old key alive.
+  async principalOf(userId) {
+    const { principal } = await this.call("POST", "/v1/principals", { alias: userId, name: KEY_NAME });
+    return principal;
+  }
   async issueKey(userId, replaces) {
-    await this.call("PUT", "/v1/accounts/" + encodeURIComponent(userId), {});
-    const { key } = await this.call("POST", "/v1/accounts/" + encodeURIComponent(userId) + "/keys", { name: KEY_NAME, ...(replaces ? { replaces } : {}) });
-    return key;
+    const principal = await this.principalOf(userId);
+    const { credential, token } = await this.call("POST", "/v1/principals/" + encodeURIComponent(principal.id) + "/credentials", { kind: "key", ...(replaces ? { replaces } : {}) });
+    return { id: credential.id, principal_id: principal.id, name: KEY_NAME, token };
   }
 
   async revokeKey(userId, keyId) {
-    await this.call("DELETE", "/v1/accounts/" + encodeURIComponent(userId) + "/keys/" + encodeURIComponent(keyId), {});
+    const principal = await this.principalOf(userId);
+    await this.call("DELETE", "/v1/principals/" + encodeURIComponent(principal.id) + "/credentials/" + encodeURIComponent(keyId), {});
   }
 
-  // A single-use link to one of this user's requests, made only after we checked who is asking.
+  // A single-use link to one of this user's requests, made only after we checked who is asking: the link is a
+  // credential of that user's principal, and Foundation refuses it for a request that is not theirs.
   async link(userId, requestId) {
     if (typeof requestId !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(requestId)) throw Object.assign(new Error("Unknown request."), { status: 404, local: true });
-    const { url } = await this.call("POST", "/v1/request-links", { request_id: requestId, external_id: userId });
+    const principal = await this.principalOf(userId);
+    const { url } = await this.call("POST", "/v1/principals/" + encodeURIComponent(principal.id) + "/credentials", { kind: "link", request_id: requestId });
     return url;
   }
 
